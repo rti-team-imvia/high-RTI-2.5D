@@ -1,24 +1,37 @@
-# This file contains information about the input data format and how to prepare the depth map for processing.
+# Input Data Format and Preparation
 
-## Input Data Format
+## Supported Depth Map Formats
 
-The input data for this project consists of depth maps that are used to create a 2.5D volumetric representation. The depth maps should be provided in a suitable format, such as:
+This tool accepts the following depth map formats:
 
-- **Image Format**: PNG, JPEG, or TIFF
-- **Data Type**: 16-bit grayscale images are preferred for depth representation.
+- **32-bit TIFF files** (preferred): Contains floating-point metric depth values in meters
+- **16-bit PNG/TIFF files**: Typically contain depth in millimeters (will be converted to meters)
+- **8-bit images**: Less accurate depth representation, typically for visualization
 
-## Preparing the Depth Map
+## Camera Intrinsics File
 
-To prepare the depth map for processing, follow these steps:
+The `intrinsics.json` file should be formatted as follows:
 
-1. **Capture the Depth Map**: Use a camera or depth sensor to capture the scene. Ensure that the depth map is aligned with the RGB image if available.
+```json
+{
+  "fx": 525.0,  // Focal length in x-direction (pixels)
+  "fy": 525.0,  // Focal length in y-direction (pixels)
+  "cx": 319.5,  // Principal point x-coordinate (pixels)
+  "cy": 239.5,  // Principal point y-coordinate (pixels)
+  "width": 640, // Image width (pixels)
+  "height": 480 // Image height (pixels)
+}
+```
 
-2. **Format the Depth Map**: Convert the depth map to a 16-bit grayscale image if it is not already in this format. This can be done using image processing software or libraries.
+## Masks (Optional)
 
-3. **Normalization**: Normalize the depth values to ensure they are within the expected range. The depth values should represent the distance from the camera to the objects in the scene.
+A binary mask image (`mask.png`) can be provided to isolate the region of interest:
+- White pixels (255) indicate valid regions
+- Black pixels (0) indicate regions to ignore
 
-4. **Save the Depth Map**: Save the processed depth map in the `data/input` directory of the project.
+## File Naming
 
-## Example
-
-An example of a properly formatted depth map file might be named `depth_map.png` and located in the `data/input` directory. Ensure that the file is accessible by the application when running the processing pipeline.
+Standard file names expected by the application:
+- `depth.tiff` or `depth.png`: Depth map
+- `mask.png`: Optional mask
+- `intrinsics.json`: Camera parameters
