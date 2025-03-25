@@ -40,14 +40,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
-# Input data files
-data/input/*.png
-data/input/*.jpg
-data/input/*.jpeg
-data/input/*.tiff
-data/input/*.tif
-data/input/*.exr
-data/input/*.raw
+
 
 # Output generated files
 data/output/*
