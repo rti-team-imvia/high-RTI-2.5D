@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+import matplotlib.pyplot as plt
 from skimage import filters, morphology
 
 class DepthProcessor:
@@ -202,14 +203,16 @@ class DepthProcessor:
                     # Fill hole
                     self.depth_map[hole_pixels] = fill_value
     
-    def process_metric_depth(self, depth_map, mask=None):
+    def process_metric_depth(self, depth_map, mask=None, normal_map=None, camera_intrinsics=None):
         """
-        Process a metric depth map (like 32-bit TIFF) with minimal modifications.
+        Process a metric depth map with minimal modifications.
         For metric depth maps, we want to preserve the actual depth values.
         
         Args:
             depth_map: 2D numpy array with metric depth values
             mask: Optional binary mask to filter valid regions
+            normal_map: Optional normal map to correct depth inaccuracies
+            camera_intrinsics: Optional camera intrinsics for correct projection
             
         Returns:
             numpy.ndarray: Processed depth map
@@ -220,35 +223,244 @@ class DepthProcessor:
         if mask is not None:
             self.depth_map = self.depth_map * (mask > 0)
         
-        # For 32-bit float depth maps, ensure no negative depths
-        # but use a small threshold to avoid removing legitimate very small values
-        min_depth_threshold = 0.001  # 1mm minimum depth
-        self.depth_map[self.depth_map < min_depth_threshold] = 0
+        # Ensure no negative or invalid depth values
+        self.depth_map = np.maximum(self.depth_map, 0)
+        
+        # Correct depth using normal map if available
+        if normal_map is not None:
+            print("Using normal map to correct depth inaccuracies in flat regions...")
+            self.depth_map = self.correct_depth_with_normals(
+                self.depth_map, 
+                normal_map, 
+                mask,
+                camera_intrinsics=camera_intrinsics,  # Add this parameter
+                smoothness_weight=0.7,  # How strongly to apply corrections (0-1)
+                iterations=2            # Number of refinement passes
+            )
+        
+        # Optional light bilateral filtering to reduce noise while preserving edges
+        self.depth_map = cv2.bilateralFilter(
+            self.depth_map.astype(np.float32), 
+            d=5,  # Smaller neighborhood for less aggressive filtering
+            sigmaColor=0.03,
+            sigmaSpace=1.0
+        )
         
         # Report depth statistics
-        valid_depth = self.depth_map > min_depth_threshold
+        valid_depth = self.depth_map > 0
         if np.any(valid_depth):
             min_depth = np.min(self.depth_map[valid_depth])
             max_depth = np.max(self.depth_map[valid_depth])
             mean_depth = np.mean(self.depth_map[valid_depth])
-            std_depth = np.std(self.depth_map[valid_depth])
-            print(f"Depth statistics - min: {min_depth:.6f}m, max: {max_depth:.6f}m, mean: {mean_depth:.6f}m, std: {std_depth:.6f}m")
-        
-        # Optional light bilateral filtering to reduce noise while preserving edges
-        # For 32-bit float depth maps, we need to be careful with the filter parameters
-        if np.any(valid_depth):
-            # Use depth statistics to determine appropriate filter parameters
-            depth_range = max_depth - min_depth
-            sigma_color = depth_range * 0.01  # 1% of depth range
-            
-            filtered_depth = cv2.bilateralFilter(
-                self.depth_map.astype(np.float32), 
-                d=5,  # Smaller neighborhood for less aggressive filtering
-                sigmaColor=sigma_color,
-                sigmaSpace=2.0
-            )
-            
-            # Only update values where we had valid depth before
-            self.depth_map[valid_depth] = filtered_depth[valid_depth]
+            print(f"Depth statistics - min: {min_depth:.3f}m, max: {max_depth:.3f}m, mean: {mean_depth:.3f}m")
         
         return self.depth_map
+
+    def correct_depth_with_normals(self, depth_map, normal_map, mask=None, 
+                                   camera_intrinsics=None, smoothness_weight=0.8, iterations=3):
+        """
+        Correct depth map inaccuracies using normal map information.
+        Particularly improves flat areas by using normal consistency.
+        
+        Args:
+            depth_map: 2D numpy array with metric depth values
+            normal_map: 3D numpy array with normal vectors [H, W, 3]
+            mask: Optional binary mask for valid regions
+            camera_intrinsics: Camera intrinsics object with fx, fy, cx, cy
+            smoothness_weight: Weight of normal-based correction (0-1)
+            iterations: Number of refinement iterations
+            
+        Returns:
+            numpy.ndarray: Corrected depth map
+        """
+        if normal_map is None:
+            print("No normal map provided for depth correction.")
+            return depth_map
+            
+        print("Correcting depth map using normal information...")
+        
+        # Create a copy to work with
+        corrected_depth = depth_map.copy()
+        
+        # Get dimensions
+        height, width = depth_map.shape
+        
+        # Create valid pixel mask
+        if mask is not None:
+            valid_mask = mask > 0
+        else:
+            valid_mask = np.ones_like(depth_map, dtype=bool)
+        
+        # Further filter by valid depth
+        valid_mask = valid_mask & (depth_map > 0)
+        
+        # Get camera intrinsics for depth-to-point conversion
+        if camera_intrinsics is not None:
+            fx = camera_intrinsics.fx
+            fy = camera_intrinsics.fy
+            cx = camera_intrinsics.cx
+            cy = camera_intrinsics.cy
+            print(f"Using provided camera intrinsics: fx={fx}, fy={fy}, cx={cx}, cy={cy}")
+        else:
+            # Use reasonable defaults if not provided
+            fx = 525.0
+            fy = 525.0
+            cx = width / 2
+            cy = height / 2
+            print(f"Using default camera intrinsics: fx={fx}, fy={fy}, cx={cx}, cy={cy}")
+        
+        # Create pixel coordinate grids
+        v, u = np.indices((height, width)).astype(np.float32)
+        
+        # Identify regions with consistent normals (likely flat surfaces)
+        print("Identifying flat regions using normal consistency...")
+        
+        # Calculate normal consistency in local neighborhoods
+        kernel_size = 5
+        normal_consistency = np.zeros_like(depth_map)
+        
+        # For each valid pixel
+        for y in range(kernel_size, height - kernel_size, kernel_size // 2):
+            for x in range(kernel_size, width - kernel_size, kernel_size // 2):
+                if not valid_mask[y, x]:
+                    continue
+                    
+                # Get neighborhood
+                y_min, y_max = max(0, y - kernel_size), min(height, y + kernel_size + 1)
+                x_min, x_max = max(0, x - kernel_size), min(width, x + kernel_size + 1)
+                
+                # Get center normal
+                center_normal = normal_map[y, x]
+                
+                # Get neighborhood normals
+                neighborhood = normal_map[y_min:y_max, x_min:x_max]
+                
+                # Calculate dot products with center normal
+                # Reshape center normal to [1, 1, 3] for broadcasting
+                center_normal = center_normal.reshape(1, 1, 3)
+                dot_products = np.sum(neighborhood * center_normal, axis=2)
+                
+                # Calculate consistency (higher is more consistent)
+                consistency = np.mean(np.abs(dot_products))
+                
+                # Mark this region's consistency
+                normal_consistency[y_min:y_max, x_min:x_max] = np.maximum(
+                    normal_consistency[y_min:y_max, x_min:x_max],
+                    consistency
+                )
+        
+        # Normalize consistency scores
+        if np.max(normal_consistency) > 0:
+            normal_consistency = normal_consistency / np.max(normal_consistency)
+        
+        # Visualize normal consistency (for debugging)
+        plt.figure(figsize=(10, 8))
+        plt.imshow(normal_consistency, cmap='viridis')
+        plt.colorbar(label='Normal Consistency')
+        plt.title('Normal Consistency Map (Higher = More Flat)')
+        plt.savefig('normal_consistency.png', bbox_inches='tight')
+        plt.close()
+        
+        # Iterative correction
+        for iteration in range(iterations):
+            print(f"Depth correction iteration {iteration+1}/{iterations}")
+            
+            # Convert depth to 3D points
+            z = corrected_depth
+            x = (u - cx) * z / fx
+            y = (v - cy) * z / fy
+            
+            # For each pixel
+            for y_idx in range(kernel_size, height - kernel_size):
+                for x_idx in range(kernel_size, width - kernel_size):
+                    if not valid_mask[y_idx, x_idx]:
+                        continue
+                        
+                    # Skip pixels in non-flat regions (low consistency)
+                    if normal_consistency[y_idx, x_idx] < 0.7:  # Threshold for flatness
+                        continue
+                    
+                    # Get neighborhood
+                    y_min, y_max = max(0, y_idx - kernel_size), min(height, y_idx + kernel_size + 1)
+                    x_min, x_max = max(0, x_idx - kernel_size), min(width, x_idx + kernel_size + 1)
+                    
+                    # Create local mask for valid pixels
+                    local_mask = valid_mask[y_min:y_max, x_min:x_max]
+                    if not np.any(local_mask):
+                        continue
+                    
+                    # Get the surface normal at this pixel
+                    normal = normal_map[y_idx, x_idx]
+                    
+                    # Get 3D points in neighborhood
+                    local_z = z[y_min:y_max, x_min:x_max][local_mask]
+                    local_x = x[y_min:y_max, x_min:x_max][local_mask]
+                    local_y = y[y_min:y_max, x_min:x_max][local_mask]
+                    
+                    # Stack into points
+                    local_points = np.stack((local_x, local_y, local_z), axis=1)
+                    
+                    if len(local_points) < 3:  # Need at least 3 points for a plane
+                        continue
+                    
+                    # Compute centroid of local points
+                    centroid = np.mean(local_points, axis=0)
+                    
+                    # Current point
+                    current_point = np.array([x[y_idx, x_idx], y[y_idx, x_idx], z[y_idx, x_idx]])
+                    
+                    # Project current point onto the plane defined by centroid and normal
+                    # The plane equation is: normal·(p - centroid) = 0
+                    # where p is any point on the plane
+                    
+                    # Vector from centroid to current point
+                    v_to_point = current_point - centroid
+                    
+                    # Distance from point to plane
+                    dist_to_plane = np.dot(v_to_point, normal)
+                    
+                    # Projected point
+                    projected_point = current_point - dist_to_plane * normal
+                    
+                    # Update depth using a weighted combination of original and corrected depth
+                    # Weight by normal consistency - more consistent = more correction
+                    weight = smoothness_weight * normal_consistency[y_idx, x_idx]
+                    corrected_depth[y_idx, x_idx] = (1 - weight) * corrected_depth[y_idx, x_idx] + \
+                                                   weight * projected_point[2]
+        
+        # Apply median filter to smooth results
+        corrected_depth = cv2.medianBlur(
+            corrected_depth.astype(np.float32), 
+            ksize=3
+        )
+        
+        # Visualize the correction (for debugging)
+        plt.figure(figsize=(15, 5))
+        
+        plt.subplot(1, 3, 1)
+        plt.imshow(depth_map, cmap='viridis')
+        plt.title('Original Depth')
+        plt.colorbar()
+        
+        plt.subplot(1, 3, 2)
+        plt.imshow(corrected_depth, cmap='viridis')
+        plt.title('Corrected Depth')
+        plt.colorbar()
+        
+        plt.subplot(1, 3, 3)
+        diff = corrected_depth - depth_map
+        plt.imshow(diff, cmap='RdBu')
+        plt.title('Difference (Red = Added, Blue = Removed)')
+        plt.colorbar()
+        
+        plt.tight_layout()
+        plt.savefig('depth_correction.png', bbox_inches='tight')
+        plt.close()
+        
+        # Report statistics on changes
+        valid_diff = diff[valid_mask]
+        if len(valid_diff) > 0:
+            print(f"Depth correction stats: min={valid_diff.min():.6f}m, max={valid_diff.max():.6f}m, mean={valid_diff.mean():.6f}m")
+            print(f"Absolute changes: mean={np.abs(valid_diff).mean():.6f}m, median={np.median(np.abs(valid_diff)):.6f}m")
+        
+        return corrected_depth

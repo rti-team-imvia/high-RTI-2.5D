@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from processing.depth_processor import DepthProcessor
 from processing.volume_generator import VolumeGenerator
 from utils.file_io import load_depth_map, load_mask, load_normal_map, save_volume, load_intrinsics
-from utils.visualization import visualize_depth_map, visualize_volume, visualize_depth_cross_section, visualize_camera_and_points
+from utils.visualization import *
 from camera.intrinsics import CameraIntrinsics
 
 def main():
@@ -22,6 +22,7 @@ def main():
     # Define input files
     depth_map_path = os.path.join(input_dir, 'depth.tiff')
     mask_path = os.path.join(input_dir, 'mask.png')
+    normal_map_path = os.path.join(input_dir, 'normal.png')  # Add this line
     
     # Load camera intrinsics (default values used if file not found)
     intrinsics_path = os.path.join(input_dir, 'intrinsics.json')
@@ -57,26 +58,41 @@ def main():
     print(f"Visualizing depth map to {depth_vis_path}")
     visualize_depth_map(depth_map, save_path=depth_vis_path, show=False)
     
-    # Process the depth map - minimal processing for metric depth data
+    # Load normal map if available
+    normal_map = None
+    if os.path.exists(normal_map_path):
+        print(f"Loading normal map from {normal_map_path}")
+        normal_map = load_normal_map(normal_map_path)
+        print(f"Normal map shape: {normal_map.shape}")
+        
+        # Visualize the input normal map
+        normal_vis_path = os.path.join(output_dir, 'normal_visualization.png')
+        print(f"Visualizing normal map to {normal_vis_path}")
+        visualize_normal_map(normal_map, save_path=normal_vis_path, show=False)
+    
+    # Process the depth map using the normal map for correction
     print("Processing depth map...")
     depth_processor = DepthProcessor()
     processed_depth = depth_processor.process_metric_depth(
         depth_map, 
-        mask
+        mask,
+        normal_map,  # Pass the normal map to correct depth inaccuracies
+        camera_intrinsics  # Pass the camera intrinsics for correct projection
     )
     
-    # Visualize the processed depth map
+    # Visualize the processed depth map with normal enhancement
     processed_vis_path = os.path.join(output_dir, 'processed_depth_visualization.png')
     print(f"Visualizing processed depth map to {processed_vis_path}")
-    visualize_depth_map(processed_depth, save_path=processed_vis_path, show=False)
+    visualize_depth_map(processed_depth, normal_map=normal_map, save_path=processed_vis_path, show=False)
     
     # Generate the volumetric representation
     print("Generating volumetric representation...")
     volume_generator = VolumeGenerator(camera_intrinsics)
-    # For metric depth, no need for camera offset
+    # Add normal_map parameter
     volume = volume_generator.create_volume_from_metric_depth(
         processed_depth,
         mask, 
+        normal_map=normal_map,  # Add this parameter
         voxel_size=0.001  # Adjust voxel size for resolution
     )
     

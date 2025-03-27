@@ -3,23 +3,72 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import open3d as o3d
 import os
+import cv2
 
-def visualize_depth_map(depth_map, save_path=None, show=True, colormap='viridis'):
+def visualize_depth_map(depth_map, normal_map=None, save_path=None, show=True):
     """
-    Visualize a depth map as a heatmap.
+    Visualize a depth map.
     
     Args:
         depth_map: 2D numpy array with depth values
+        normal_map: Optional normal map for enhanced visualization
         save_path: Optional path to save the visualization
         show: Whether to display the visualization
-        colormap: Matplotlib colormap to use
     """
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(12, 10))
     
-    # Plot depth map
-    plt.imshow(depth_map, cmap=colormap)
-    plt.colorbar(label='Depth')
-    plt.title('Depth Map')
+    # If we have a normal map, create an enhanced visualization
+    if normal_map is not None:
+        plt.subplot(2, 2, 1)
+        plt.imshow(depth_map, cmap='viridis')
+        plt.colorbar(label='Depth (m)')
+        plt.title('Depth Map')
+        
+        # Visualize normals
+        plt.subplot(2, 2, 2)
+        # Convert to RGB by shifting from [-1,1] to [0,1] range
+        rgb_normals = (normal_map + 1.0) / 2.0
+        plt.imshow(rgb_normals)
+        plt.title('Normal Map (RGB = XYZ)')
+        
+        # Visualize normal-enhanced depth
+        plt.subplot(2, 2, 3)
+        
+        # Use normals to create shaded relief
+        # Extract components from normal map
+        nx = normal_map[:,:,0]
+        ny = normal_map[:,:,1]
+        nz = normal_map[:,:,2]
+        
+        # Create a simple shading based on dot product with a light direction
+        light_dir = np.array([0.5, 0.5, 0.7])  # Light from top-right
+        light_dir = light_dir / np.linalg.norm(light_dir)
+        
+        shading = nx * light_dir[0] + ny * light_dir[1] + nz * light_dir[2]
+        
+        # Clip to [0, 1] range
+        shading = np.clip(shading, 0, 1)
+        
+        # Apply shading to depth map
+        plt.imshow(depth_map * shading, cmap='gray')
+        plt.colorbar(label='Shaded Depth')
+        plt.title('Normal-Enhanced Depth')
+        
+        # Compute gradient of depth for comparison
+        plt.subplot(2, 2, 4)
+        dx = cv2.Sobel(depth_map, cv2.CV_32F, 1, 0, ksize=3)
+        dy = cv2.Sobel(depth_map, cv2.CV_32F, 0, 1, ksize=3)
+        gradient_magnitude = np.sqrt(dx**2 + dy**2)
+        plt.imshow(gradient_magnitude, cmap='viridis')
+        plt.colorbar(label='Gradient Magnitude')
+        plt.title('Depth Gradient (Edges)')
+    else:
+        # Simple depth visualization
+        plt.imshow(depth_map, cmap='viridis')
+        plt.colorbar(label='Depth (m)')
+        plt.title('Depth Map')
+    
+    plt.tight_layout()
     
     # Save if requested
     if save_path:
@@ -306,6 +355,35 @@ def visualize_depth_comparison(original_depth, processed_depth, mask=None, save_
     axes[1, 1].grid(True)
     
     plt.tight_layout()
+    
+    # Save if requested
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches='tight', dpi=150)
+    
+    # Show if requested
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+def visualize_normal_map(normal_map, save_path=None, show=True):
+    """
+    Visualize a normal map as an RGB image.
+    
+    Args:
+        normal_map: 3D numpy array with shape [H, W, 3] containing XYZ normal vectors
+        save_path: Optional path to save the visualization
+        show: Whether to display the visualization
+    """
+    plt.figure(figsize=(10, 8))
+    
+    # Convert normals from [-1,1] range to [0,1] for visualization
+    vis_normals = (normal_map + 1.0) / 2.0
+    
+    # Plot normal map
+    plt.imshow(vis_normals)
+    plt.title('Normal Map (RGB = XYZ)')
     
     # Save if requested
     if save_path:

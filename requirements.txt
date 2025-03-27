@@ -3,3 +3,7 @@ opencv-python
 matplotlib
 scikit-image
 Pillow
+open3d
+tifffile
+cupy-cuda12x  # CUDA acceleration for NumPy operations (choose version matching your CUDA)
+torch         # Deep learning framework with excellent CUDA support

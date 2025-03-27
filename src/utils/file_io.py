@@ -102,29 +102,39 @@ def load_mask(file_path):
 
 def load_normal_map(file_path):
     """
-    Load a normal map from an image file.
+    Load a normal map from an image file and convert to proper [-1,1] range.
     
     Args:
         file_path: Path to the normal map image
         
     Returns:
-        numpy.ndarray: Normal map as a 3-channel array
+        numpy.ndarray: Normal map as a 3-channel array in range [-1,1]
     """
     if not os.path.exists(file_path):
         return None
         
-    # Read normal map (BGR format)
+    # Read normal map (BGR format in OpenCV)
     normal_map = cv2.imread(file_path, cv2.IMREAD_COLOR)
     
+    if normal_map is None:
+        print(f"Warning: Failed to load normal map from {file_path}")
+        return None
+        
     # Convert BGR to RGB
     normal_map = cv2.cvtColor(normal_map, cv2.COLOR_BGR2RGB)
     
     # Normalize to [-1, 1] range
+    # Most normal maps store vectors as color values from 0-255
+    # where (128,128,255) represents the vector (0,0,1)
     normal_map = normal_map.astype(np.float32) / 127.5 - 1.0
     
     # Ensure unit length normals
     magnitude = np.sqrt(np.sum(normal_map**2, axis=2, keepdims=True))
-    normal_map = normal_map / (magnitude + 1e-10)
+    # Avoid division by zero
+    magnitude = np.maximum(magnitude, 1e-10)
+    normal_map = normal_map / magnitude
+    
+    print(f"Loaded normal map with shape {normal_map.shape}")
     
     return normal_map
 
