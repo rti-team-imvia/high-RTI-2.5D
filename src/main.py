@@ -77,7 +77,7 @@ def main():
     volume = volume_generator.create_volume_from_metric_depth(
         processed_depth,
         mask, 
-        voxel_size=0.01  # Adjust voxel size for resolution
+        voxel_size=0.001  # Adjust voxel size for resolution
     )
     
     # Save the volumetric mesh

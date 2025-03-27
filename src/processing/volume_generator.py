@@ -242,13 +242,13 @@ class VolumeGenerator:
         pcd.points = o3d.utility.Vector3dVector(points)
         
         # Apply statistical outlier removal
-        """if len(points) > 100:  # Only if we have enough points
+        if len(points) > 100:  # Only if we have enough points
             print("Removing statistical outliers...")
             pcd, _ = pcd.remove_statistical_outlier(
                 nb_neighbors=20,
                 std_ratio=2.0
             )
-            print(f"After outlier removal: {len(pcd.points)} points")"""
+            print(f"After outlier removal: {len(pcd.points)} points")
         
         # Estimate normals
         pcd.estimate_normals(
