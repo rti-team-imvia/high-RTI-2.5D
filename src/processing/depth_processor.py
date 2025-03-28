@@ -22,7 +22,7 @@ class DepthProcessor:
                 self.selective_gpu = True
                 print("Will use GPU only for parallel operations (convolutions, large matrix ops)")
             else:
-                print("No GPU available, using CPU only")
+                print("CUDA is available but no GPU detected, using CPU only")
         except (ImportError, ModuleNotFoundError):
             print("PyTorch not installed or CUDA not available, using CPU only")
         
@@ -202,22 +202,22 @@ class DepthProcessor:
             component_size = np.sum(labels == label)
             
             if component_size <= max_hole_size:
-                # Small hole, fill it with local median
+                # This is a small hole we want to fill
                 hole_pixels = labels == label
                 
-                # Dilate to get surrounding pixels
-                kernel = np.ones((5, 5), np.uint8)
-                dilated = cv2.dilate(hole_pixels.astype(np.uint8), kernel, iterations=1)
+                # Dilate to find boundary pixels
+                kernel = np.ones((3, 3), np.uint8)
+                dilated = cv2.dilate(hole_pixels.astype(np.uint8), kernel)
                 
-                # Get boundary pixels (dilated - original)
+                # Find boundary pixels (dilated area excluding the hole itself)
                 boundary = dilated.astype(bool) & (~hole_pixels)
                 
                 if np.any(boundary):
-                    # Get median of boundary pixels
-                    fill_value = np.median(self.depth_map[boundary])
+                    # Calculate the mean depth of boundary pixels
+                    mean_boundary_depth = np.mean(self.depth_map[boundary])
                     
-                    # Fill hole
-                    self.depth_map[hole_pixels] = fill_value
+                    # Fill the hole with the mean depth
+                    self.depth_map[hole_pixels] = mean_boundary_depth
     
     def process_metric_depth(self, depth_map, mask=None, normal_map=None, camera_intrinsics=None):
         """
@@ -242,18 +242,25 @@ class DepthProcessor:
         # Ensure no negative or invalid depth values
         self.depth_map = np.maximum(self.depth_map, 0)
         
-        # Remove normal map correction as it's not providing good results
-        # if normal_map is not None:
-        #    print("Using normal map to correct depth inaccuracies in flat regions...")
-        #    self.depth_map = self.correct_depth_with_normals(...)
+        # Apply bilateral filtering to reduce noise while preserving edges
+        print("Using bilateral filtering for noise reduction...")
+        filtered_depth = cv2.bilateralFilter(
+            self.depth_map.astype(np.float32), 
+            d=7,  # Diameter of each pixel neighborhood
+            sigmaColor=0.05,  # Filter sigma in the color space
+            sigmaSpace=2.0  # Filter sigma in the coordinate space
+        )
         
-        # Optional bilateral filtering - this is a good candidate for GPU acceleration
-        if self.selective_gpu:
-            # Use GPU for bilateral filtering with a simpler approach
-            print("Using GPU for bilateral filtering...")
-            # ... rest of the code remains the same
-
-        return self.depth_map
+        # Compute depth statistics for reporting
+        valid_pixels = self.depth_map > 0
+        if np.any(valid_pixels):
+            min_depth = np.min(self.depth_map[valid_pixels])
+            max_depth = np.max(self.depth_map[valid_pixels])
+            mean_depth = np.mean(self.depth_map[valid_pixels])
+            print(f"Depth statistics - min: {min_depth:.3f}m, max: {max_depth:.3f}m, mean: {mean_depth:.3f}m")
+        
+        # Return the filtered depth map
+        return filtered_depth
 
     def correct_depth_with_normals(self, depth_map, normal_map, mask=None, 
                                    camera_intrinsics=None, smoothness_weight=0.8, iterations=3):

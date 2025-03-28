@@ -1,7 +1,7 @@
 import numpy as np
 import open3d as o3d
 from camera.intrinsics import CameraIntrinsics
-
+import matplotlib.pyplot as plt
 class VolumeGenerator:
     """
     Class for generating volumetric representations from depth maps.
@@ -22,14 +22,12 @@ class VolumeGenerator:
         try:
             import torch
             if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+                print(f"Using selective GPU acceleration for point cloud generation")
                 self.selective_gpu = selective_gpu
-                if self.selective_gpu:
-                    self.device = torch.device("cuda")
-                    print(f"Using selective GPU acceleration for point cloud generation")
-                else:
-                    self.device = torch.device("cpu")
             else:
                 self.device = torch.device("cpu")
+                print("CUDA is available but no GPU detected, using CPU only")
         except (ImportError, ModuleNotFoundError):
             self.device = "cpu"
             print("PyTorch not installed or CUDA not available, using CPU only")
@@ -215,6 +213,8 @@ class VolumeGenerator:
         # Add colors if provided
         if color_map is not None and color_map.shape[:2] == depth_map.shape:
             # Extract colors for valid pixels
+            valid_y = valid_indices[0].cpu().numpy()
+            valid_x = valid_indices[1].cpu().numpy()
             colors = color_map[valid_y, valid_x]
             # Normalize colors to [0, 1] range if needed
             if colors.dtype == np.uint8:
@@ -305,10 +305,21 @@ class VolumeGenerator:
     def create_volume_from_metric_depth(self, depth_map, mask=None, normal_map=None, color_map=None, voxel_size=0.01):
         """
         Create a volumetric representation from a metric depth map.
+        Optionally uses normal map for improved reconstruction.
+        
+        Args:
+            depth_map: 2D numpy array with metric depth values
+            mask: Optional binary mask to filter valid regions
+            normal_map: Optional 3D numpy array with normal vectors (shape [H, W, 3])
+            color_map: Optional color map for point cloud coloring
+            voxel_size: Size of voxels in the volumetric representation
+            
+        Returns:
+            dict: Dictionary containing the volumetric mesh and point cloud
         """
         # Generate point cloud
         if self.selective_gpu:
-            # Pass color_map to the GPU implementation
+            # Use GPU for the parallelizable coordinates calculation
             pcd = self.depth_to_point_cloud_gpu(depth_map, mask, normal_map, color_map)
         else:
             # Use CPU implementation
@@ -316,7 +327,8 @@ class VolumeGenerator:
         
         # Check if point cloud has enough points
         if len(pcd.points) < 10:
-            print("ERROR: Not enough points to create a volumetric representation")
+            print("ERROR: Not enough valid points to create a volumetric representation")
+            # Return empty volume
             return {
                 "mesh": o3d.geometry.TriangleMesh(),
                 "point_cloud": pcd,
@@ -340,7 +352,19 @@ class VolumeGenerator:
         
         # Filter out low-density vertices
         if len(densities) > 0:
-            vertices_to_remove = densities < np.quantile(densities, 0.05)
+            # Convert densities to numpy array before division
+            densities_np = np.asarray(densities)
+            
+            # Now we can safely perform operations on the numpy array
+            density_colors = plt.cm.plasma(densities_np / np.max(densities_np))[:, :3]
+            
+            density_mesh = o3d.geometry.TriangleMesh()
+            density_mesh.vertices = mesh.vertices
+            density_mesh.triangles = mesh.triangles
+            density_mesh.vertex_colors = o3d.utility.Vector3dVector(density_colors)
+            
+            # Remove vertices with low density
+            vertices_to_remove = densities_np < np.quantile(densities_np, 0.1)
             mesh.remove_vertices_by_mask(vertices_to_remove)
         
         # Clean up mesh
