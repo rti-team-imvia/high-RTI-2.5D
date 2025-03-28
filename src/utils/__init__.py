@@ -10,3 +10,5 @@ from .visualization import (
     visualize_normal_map,
     color_point_cloud_by_normals
 )
+from .gpu_utils import check_gpu_availability, gpu_enabled_bilateral_filter
+from .point_cloud_utils import calculate_normal_consistency, filter_point_cloud, merge_point_clouds

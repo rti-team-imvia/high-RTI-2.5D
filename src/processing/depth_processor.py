@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from skimage import filters, morphology
+from utils.gpu_utils import check_gpu_availability, gpu_enabled_bilateral_filter
 
 class DepthProcessor:
     """
@@ -9,23 +10,10 @@ class DepthProcessor:
     """
     def __init__(self):
         self.depth_map = None
-        self.selective_gpu = False
-        
-        # Check if GPU is available
-        try:
-            import torch
-            if torch.cuda.is_available():
-                device_name = torch.cuda.get_device_name(0)
-                cuda_version = torch.version.cuda
-                print(f"GPU available: {device_name}")
-                print(f"CUDA version: {cuda_version}")
-                self.selective_gpu = True
-                print("Will use GPU only for parallel operations (convolutions, large matrix ops)")
-            else:
-                print("CUDA is available but no GPU detected, using CPU only")
-        except (ImportError, ModuleNotFoundError):
-            print("PyTorch not installed or CUDA not available, using CPU only")
-        
+        self.selective_gpu, _, _, _ = check_gpu_availability()
+        if self.selective_gpu:
+            print("Will use GPU only for parallel operations (convolutions, large matrix ops)")
+    
     def process(self, depth_map, mask=None, invert_depth=True, normalize=True, 
                 remove_outliers=True, percentile_clip=(2, 98)):
         """
@@ -80,12 +68,21 @@ class DepthProcessor:
             
         # Remove noise with bilateral filter (preserves edges)
         # Only filter the valid regions
-        filtered_depth = cv2.bilateralFilter(
-            self.depth_map.astype(np.float32), 
-            d=7,  # Diameter of each pixel neighborhood
-            sigmaColor=0.05,  # Filter sigma in the color space
-            sigmaSpace=2.0  # Filter sigma in the coordinate space
-        )
+        if self.selective_gpu:
+            print("Using GPU for bilateral filtering...")
+            filtered_depth = gpu_enabled_bilateral_filter(
+                self.depth_map, 
+                d=7,  # Diameter of each pixel neighborhood
+                sigma_color=0.05,  # Filter sigma in the color space
+                sigma_space=2.0  # Filter sigma in the coordinate space
+            )
+        else:
+            filtered_depth = cv2.bilateralFilter(
+                self.depth_map.astype(np.float32), 
+                d=7,  # Diameter of each pixel neighborhood
+                sigmaColor=0.05,  # Filter sigma in the color space
+                sigmaSpace=2.0  # Filter sigma in the coordinate space
+            )
         self.depth_map = filtered_depth
         
         # Fill small holes using morphological operations
@@ -122,7 +119,7 @@ class DepthProcessor:
             component_size = np.sum(labels == label)
             
             # Remove small components (adjust threshold as needed)
-            if component_size < 100:  # Remove components smaller than 100 pixels
+            if component_size < 100:
                 binary_mask[labels == label] = 0
                 
         # Close small holes in the mask
@@ -242,14 +239,26 @@ class DepthProcessor:
         # Ensure no negative or invalid depth values
         self.depth_map = np.maximum(self.depth_map, 0)
         
+        # Fill small holes (optional)
+        self._fill_small_holes(max_hole_size=15)
+        
         # Apply bilateral filtering to reduce noise while preserving edges
         print("Using bilateral filtering for noise reduction...")
-        filtered_depth = cv2.bilateralFilter(
-            self.depth_map.astype(np.float32), 
-            d=7,  # Diameter of each pixel neighborhood
-            sigmaColor=0.05,  # Filter sigma in the color space
-            sigmaSpace=2.0  # Filter sigma in the coordinate space
-        )
+        if self.selective_gpu:
+            print("Using GPU for bilateral filtering...")
+            filtered_depth = gpu_enabled_bilateral_filter(
+                self.depth_map, 
+                d=7,  # Diameter of each pixel neighborhood
+                sigma_color=0.05,  # Filter sigma in the color space
+                sigma_space=2.0  # Filter sigma in the coordinate space
+            )
+        else:
+            filtered_depth = cv2.bilateralFilter(
+                self.depth_map.astype(np.float32), 
+                d=7,  # Diameter of each pixel neighborhood
+                sigmaColor=0.05,  # Filter sigma in the color space
+                sigmaSpace=2.0  # Filter sigma in the coordinate space
+            )
         
         # Compute depth statistics for reporting
         valid_pixels = self.depth_map > 0
