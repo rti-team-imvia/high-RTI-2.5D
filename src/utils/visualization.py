@@ -395,3 +395,34 @@ def visualize_normal_map(normal_map, save_path=None, show=True):
         plt.show()
     else:
         plt.close()
+
+def color_point_cloud_by_normals(point_cloud):
+    """
+    Color a point cloud based on its normal directions.
+    Uses normal XYZ components mapped to RGB colors.
+    
+    Args:
+        point_cloud: open3d.geometry.PointCloud object with normals
+        
+    Returns:
+        open3d.geometry.PointCloud: Point cloud with colors
+    """
+    if not isinstance(point_cloud, o3d.geometry.PointCloud):
+        raise ValueError("Input must be an Open3D PointCloud")
+        
+    if not point_cloud.has_normals():
+        point_cloud.estimate_normals()
+        point_cloud.orient_normals_towards_camera_location(np.array([0, 0, 0]))
+        print("Estimated normals for the point cloud")
+    
+    # Get the normal vectors
+    normals = np.asarray(point_cloud.normals)
+    
+    # Map normal directions to colors
+    # Convert from [-1, 1] range to [0, 1] range for RGB colors
+    colors = (normals + 1.0) / 2.0
+    
+    # Assign colors to the point cloud
+    point_cloud.colors = o3d.utility.Vector3dVector(colors)
+    
+    return point_cloud
