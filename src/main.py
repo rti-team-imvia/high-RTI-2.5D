@@ -1,13 +1,14 @@
 import os
 import sys
 import numpy as np
+import cv2
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from processing.depth_processor import DepthProcessor
 from processing.volume_generator import VolumeGenerator
-from utils.file_io import load_depth_map, load_mask, load_normal_map, save_volume, load_intrinsics
+from utils.file_io import *
 from utils.visualization import *
 from camera.intrinsics import CameraIntrinsics
 
@@ -23,6 +24,7 @@ def main():
     depth_map_path = os.path.join(input_dir, 'depth.tiff')
     mask_path = os.path.join(input_dir, 'mask.png')
     normal_map_path = os.path.join(input_dir, 'normal.png')  # Add this line
+    color_map_path = os.path.join(input_dir, 'baseColor.png')  # Adjust filename as needed
     
     # Load camera intrinsics (default values used if file not found)
     intrinsics_path = os.path.join(input_dir, 'intrinsics.json')
@@ -70,6 +72,17 @@ def main():
         print(f"Visualizing normal map to {normal_vis_path}")
         visualize_normal_map(normal_map, save_path=normal_vis_path, show=False)
     
+    # Load color image if available
+    color_map = None
+    if os.path.exists(color_map_path):
+        print(f"Loading color texture from {color_map_path}")
+        color_map = cv2.imread(color_map_path)
+        if color_map is not None:
+            color_map = cv2.cvtColor(color_map, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+            print(f"Color map shape: {color_map.shape}")
+        else:
+            print(f"Failed to load color texture from {color_map_path}")
+    
     # Process the depth map using the normal map for correction
     print("Processing depth map...")
     depth_processor = DepthProcessor()
@@ -87,12 +100,13 @@ def main():
     
     # Generate the volumetric representation
     print("Generating volumetric representation...")
-    volume_generator = VolumeGenerator(camera_intrinsics)
-    # Add normal_map parameter
+    volume_generator = VolumeGenerator(camera_intrinsics, selective_gpu=True)  # Enable selective GPU
+    # Add normal_map and color_map parameters
     volume = volume_generator.create_volume_from_metric_depth(
         processed_depth,
         mask, 
-        normal_map=normal_map,  # Add this parameter
+        normal_map=normal_map,
+        color_map=color_map,  # Add this parameter
         voxel_size=0.001  # Adjust voxel size for resolution
     )
     
@@ -110,6 +124,22 @@ def main():
     camera_debug_path = os.path.join(vis_output_dir, 'camera_and_points.png')
     print(f"Creating camera-point debug visualization to {camera_debug_path}")
     visualize_camera_and_points(volume["point_cloud"], save_path=camera_debug_path, show=False)
+    
+    # Save point cloud with normals
+    pcd_output_path = os.path.join(output_dir, 'point_cloud.ply')
+    print(f"Saving point cloud with normals to {pcd_output_path}")
+
+    # Only apply normal-based coloring if we don't have color data
+    if volume["point_cloud"].has_colors():
+        print("Using original colors from texture for point cloud")
+    else:
+        # Fall back to normal-based coloring if no colors are available
+        print("No color data available, coloring by normals instead")
+        volume["point_cloud"] = color_point_cloud_by_normals(volume["point_cloud"])
+        print("Added colors based on normal directions")
+
+    # Save in PLY format which preserves normals
+    o3d.io.write_point_cloud(pcd_output_path, volume["point_cloud"])
     
     print("Processing completed successfully!")
 

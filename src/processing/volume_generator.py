@@ -6,16 +6,35 @@ class VolumeGenerator:
     """
     Class for generating volumetric representations from depth maps.
     """
-    def __init__(self, intrinsics=None):
+    def __init__(self, intrinsics=None, selective_gpu=False):
         """
         Initialize the VolumeGenerator with camera intrinsics.
         
         Args:
             intrinsics: Camera intrinsics object or None to use default values
+            selective_gpu: Whether to use selective GPU acceleration
         """
         self.intrinsics = intrinsics or CameraIntrinsics()
+        self.selective_gpu = False
+        self.device = None
         
-    def depth_to_point_cloud(self, depth_map, mask=None, camera_offset=0.5):
+        # Check for GPU availability
+        try:
+            import torch
+            if torch.cuda.is_available():
+                self.selective_gpu = selective_gpu
+                if self.selective_gpu:
+                    self.device = torch.device("cuda")
+                    print(f"Using selective GPU acceleration for point cloud generation")
+                else:
+                    self.device = torch.device("cpu")
+            else:
+                self.device = torch.device("cpu")
+        except (ImportError, ModuleNotFoundError):
+            self.device = "cpu"
+            print("PyTorch not installed or CUDA not available, using CPU only")
+        
+    def depth_to_point_cloud(self, depth_map, mask=None, normal_map=None, color_map=None, camera_offset=0.5):
         """
         Convert a depth map to a point cloud using camera intrinsics.
         The camera is positioned at (0,0,0) looking down the positive Z axis.
@@ -23,6 +42,8 @@ class VolumeGenerator:
         Args:
             depth_map: 2D numpy array with depth values
             mask: Optional binary mask to filter valid regions
+            normal_map: Optional 3D numpy array with normal vectors (shape [H, W, 3])
+            color_map: Optional 3D numpy array with color values (shape [H, W, 3])
             camera_offset: Distance to offset the points from camera origin
             
         Returns:
@@ -81,6 +102,16 @@ class VolumeGenerator:
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points)
         
+        # Add colors if available
+        if color_map is not None and color_map.shape[:2] == depth_map.shape:
+            # Get colors for valid pixels
+            colors = color_map[valid_pixels]
+            # Normalize colors to [0, 1] range if needed
+            if colors.dtype == np.uint8:
+                colors = colors.astype(np.float32) / 255.0
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            print(f"Applied {len(colors)} colors from color map")
+        
         # Apply additional statistical outlier removal to clean up the point cloud
         pcd, _ = pcd.remove_statistical_outlier(
             nb_neighbors=30,
@@ -92,6 +123,104 @@ class VolumeGenerator:
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=50)
         )
         pcd.orient_normals_towards_camera_location(np.array([0, 0, 0]))
+        
+        return pcd
+
+    def depth_to_point_cloud_gpu(self, depth_map, mask=None, normal_map=None, color_map=None):
+        """
+        GPU-accelerated conversion of depth map to point cloud.
+        Only uses GPU for the coordinate calculation which is highly parallel.
+        
+        Args:
+            depth_map: 2D numpy array with depth values
+            mask: Optional binary mask to filter valid regions
+            normal_map: Optional normal map for enhanced point cloud
+            color_map: Optional color map for point cloud coloring
+            
+        Returns:
+            open3d.geometry.PointCloud: 3D point cloud
+        """
+        import torch
+        import open3d as o3d
+        import numpy as np
+        
+        height, width = depth_map.shape
+        
+        # Move data to GPU for the coordinate calculation
+        depth_tensor = torch.tensor(depth_map, dtype=torch.float32, device=self.device)
+        
+        if mask is not None:
+            mask_tensor = torch.tensor(mask > 0, dtype=torch.bool, device=self.device)
+        else:
+            mask_tensor = torch.ones((height, width), dtype=torch.bool, device=self.device)
+        
+        # Apply valid depth mask
+        mask_tensor = mask_tensor & (depth_tensor > 0)
+        
+        # Skip if no valid pixels
+        if not torch.any(mask_tensor):
+            print("WARNING: No valid depth values found!")
+            return o3d.geometry.PointCloud()
+        
+        # Create coordinate grids on GPU
+        v, u = torch.meshgrid(
+            torch.arange(height, device=self.device, dtype=torch.float32),
+            torch.arange(width, device=self.device, dtype=torch.float32)
+        )
+        
+        # Extract valid coordinates and depths
+        valid_indices = torch.nonzero(mask_tensor, as_tuple=True)
+        z = depth_tensor[valid_indices]
+        u_valid = u[valid_indices]
+        v_valid = v[valid_indices]
+        
+        # Get camera intrinsics
+        fx = self.intrinsics.fx
+        fy = self.intrinsics.fy
+        cx = self.intrinsics.cx
+        cy = self.intrinsics.cy
+        
+        # Calculate 3D coordinates
+        x = (u_valid - cx) * z / fx
+        y = (v_valid - cy) * z / fy
+        
+        # Create point cloud (move back to CPU for Open3D)
+        points = torch.stack((x, y, z), dim=1).cpu().numpy()
+        
+        # Debug information
+        print(f"Generated point cloud with {len(points)} points")
+        print(f"X range: [{points[:,0].min():.6f}m, {points[:,0].max():.6f}m]")
+        print(f"Y range: [{points[:,1].min():.6f}m, {points[:,1].max():.6f}m]")
+        print(f"Z range: [{points[:,2].min():.6f}m, {points[:,2].max():.6f}m]")
+        
+        # Create Open3D point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        
+        # Add normals if provided
+        if normal_map is not None:
+            # Extract normals for valid pixels (use CPU indices)
+            valid_y = valid_indices[0].cpu().numpy()
+            valid_x = valid_indices[1].cpu().numpy()
+            normals = normal_map[valid_y, valid_x]
+            pcd.normals = o3d.utility.Vector3dVector(normals)
+            print(f"Applied {len(normals)} normals from normal map")
+        else:
+            # Estimate normals
+            pcd.estimate_normals(
+                search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
+            )
+            pcd.orient_normals_towards_camera_location(np.array([0, 0, 0]))
+        
+        # Add colors if provided
+        if color_map is not None and color_map.shape[:2] == depth_map.shape:
+            # Extract colors for valid pixels
+            colors = color_map[valid_y, valid_x]
+            # Normalize colors to [0, 1] range if needed
+            if colors.dtype == np.uint8:
+                colors = colors.astype(np.float32) / 255.0
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            print(f"Applied {len(colors)} colors from color map")
         
         return pcd
 
@@ -109,7 +238,7 @@ class VolumeGenerator:
             dict: Dictionary containing the volumetric mesh and point cloud
         """
         # Convert depth map to point cloud
-        point_cloud = self.depth_to_point_cloud(depth_map, mask, camera_offset)
+        point_cloud = self.depth_to_point_cloud(depth_map, mask, camera_offset=camera_offset)
         
         # Check if point cloud has enough points
         if len(point_cloud.points) < 10:
@@ -173,88 +302,32 @@ class VolumeGenerator:
         """
         return volume["mesh"]
     
-    def create_volume_from_metric_depth(self, depth_map, mask=None, voxel_size=0.01):
+    def create_volume_from_metric_depth(self, depth_map, mask=None, normal_map=None, color_map=None, voxel_size=0.01):
         """
         Create a volumetric representation from a metric depth map.
-        For metric depth maps, we use the actual values without offset or scaling.
-        
-        Args:
-            depth_map: 2D numpy array with metric depth values
-            mask: Optional binary mask to filter valid regions
-            voxel_size: Size of voxels in the volumetric representation (in meters)
-            
-        Returns:
-            dict: Dictionary containing the volumetric mesh and point cloud
         """
-        height, width = depth_map.shape
-        
-        # Create a grid of pixel coordinates
-        v, u = np.indices((height, width)).astype(np.float32)
-        
-        # Get intrinsics parameters
-        fx = self.intrinsics.fx
-        fy = self.intrinsics.fy
-        cx = self.intrinsics.cx
-        cy = self.intrinsics.cy
-        
-        # Apply mask if provided
-        if mask is not None:
-            valid_pixels = mask > 0
+        # Generate point cloud
+        if self.selective_gpu:
+            # Pass color_map to the GPU implementation
+            pcd = self.depth_to_point_cloud_gpu(depth_map, mask, normal_map, color_map)
         else:
-            valid_pixels = np.ones_like(depth_map, dtype=bool)
-            
-        # Further filter by valid depth values - be more tolerant with 32-bit floats
-        # which might have very small but valid values
-        min_depth_threshold = 0.001  # 1mm minimum depth
-        valid_pixels = valid_pixels & (depth_map > min_depth_threshold)
+            # Use CPU implementation
+            pcd = self.depth_to_point_cloud(depth_map, mask, normal_map, color_map)
         
-        # Skip if no valid pixels
-        if not np.any(valid_pixels):
-            print("WARNING: No valid depth values found!")
+        # Check if point cloud has enough points
+        if len(pcd.points) < 10:
+            print("ERROR: Not enough points to create a volumetric representation")
             return {
                 "mesh": o3d.geometry.TriangleMesh(),
-                "point_cloud": o3d.geometry.PointCloud(),
+                "point_cloud": pcd,
                 "voxel_size": voxel_size
             }
-            
-        u_valid = u[valid_pixels]
-        v_valid = v[valid_pixels]
-        z = depth_map[valid_pixels]
-        
-        # Use the metric depth values directly - no offset needed
-        print(f"Using metric depth range: {np.min(z):.6f}m to {np.max(z):.6f}m")
-            
-        # Calculate 3D coordinates using pinhole camera model
-        x = (u_valid - cx) * z / fx
-        y = (v_valid - cy) * z / fy
-        
-        # Create point cloud
-        points = np.stack((x, y, z), axis=1)
-        
-        # Debug information
-        print(f"Generated point cloud with {len(points)} points")
-        print(f"X range: [{np.min(x):.6f}m, {np.max(x):.6f}m]")
-        print(f"Y range: [{np.min(y):.6f}m, {np.max(y):.6f}m]")
-        print(f"Z range: [{np.min(z):.6f}m, {np.max(z):.6f}m]")
-        
-        # Create Open3D point cloud
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
         
         # Apply statistical outlier removal
-        if len(points) > 100:  # Only if we have enough points
-            print("Removing statistical outliers...")
-            pcd, _ = pcd.remove_statistical_outlier(
-                nb_neighbors=20,
-                std_ratio=2.0
-            )
-            print(f"After outlier removal: {len(pcd.points)} points")
-        
-        # Estimate normals
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*5, max_nn=30)
+        pcd, _ = pcd.remove_statistical_outlier(
+            nb_neighbors=20,
+            std_ratio=2.0
         )
-        pcd.orient_normals_towards_camera_location(np.array([0, 0, 0]))
         
         # Create mesh using Poisson surface reconstruction
         print("Generating mesh with Poisson reconstruction...")
@@ -265,7 +338,7 @@ class VolumeGenerator:
             linear_fit=True
         )
         
-        # Filter out low-density vertices if needed
+        # Filter out low-density vertices
         if len(densities) > 0:
             vertices_to_remove = densities < np.quantile(densities, 0.05)
             mesh.remove_vertices_by_mask(vertices_to_remove)
@@ -278,153 +351,6 @@ class VolumeGenerator:
         
         # Compute vertex normals for rendering
         mesh.compute_vertex_normals()
-        
-        return {
-            "mesh": mesh,
-            "point_cloud": pcd,
-            "voxel_size": voxel_size
-        }
-
-    def create_volume_from_metric_depth(self, depth_map, mask=None, normal_map=None, voxel_size=0.01):
-        """
-        Create a volumetric representation from a metric depth map.
-        Optionally uses normal map for improved reconstruction.
-        
-        Args:
-            depth_map: 2D numpy array with metric depth values
-            mask: Optional binary mask to filter valid regions
-            normal_map: Optional 3D numpy array with normal vectors (shape [H, W, 3])
-            voxel_size: Size of voxels in the volumetric representation
-            
-        Returns:
-            dict: Dictionary containing the volumetric mesh and point cloud
-        """
-        height, width = depth_map.shape
-        
-        # Create a grid of pixel coordinates
-        v, u = np.indices((height, width)).astype(np.float32)
-        
-        # Get intrinsics parameters
-        fx = self.intrinsics.fx
-        fy = self.intrinsics.fy
-        cx = self.intrinsics.cx
-        cy = self.intrinsics.cy
-        
-        # Apply mask if provided
-        if mask is not None:
-            valid_pixels = mask > 0
-        else:
-            valid_pixels = np.ones_like(depth_map, dtype=bool)
-            
-        # Further filter by valid depth values
-        valid_pixels = valid_pixels & (depth_map > 0)
-        
-        # Skip if no valid pixels
-        if not np.any(valid_pixels):
-            print("WARNING: No valid depth values found!")
-            return {
-                "mesh": o3d.geometry.TriangleMesh(),
-                "point_cloud": o3d.geometry.PointCloud(),
-                "voxel_size": voxel_size
-            }
-            
-        u_valid = u[valid_pixels]
-        v_valid = v[valid_pixels]
-        z = depth_map[valid_pixels]
-        
-        # Use the metric depth values directly
-        print(f"Using metric depth range: {np.min(z):.3f}m to {np.max(z):.3f}m")
-            
-        # Calculate 3D coordinates using pinhole camera model
-        x = (u_valid - cx) * z / fx
-        y = (v_valid - cy) * z / fy
-        
-        # Create point cloud
-        points = np.stack((x, y, z), axis=1)
-        
-        # Debug information
-        print(f"Generated point cloud with {len(points)} points")
-        print(f"X range: [{np.min(x):.3f}m, {np.max(x):.3f}m]")
-        print(f"Y range: [{np.min(y):.3f}m, {np.max(y):.3f}m]")
-        print(f"Z range: [{np.min(z):.3f}m, {np.max(z):.3f}m]")
-        
-        # Create Open3D point cloud
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        
-        # If we have a normal map, use it instead of estimating normals
-        if normal_map is not None:
-            print("Using provided normal map for improved reconstruction...")
-            
-            # Extract normals for valid pixels
-            normals = normal_map[valid_pixels]
-            
-            # Convert camera-space normals to world-space
-            # Note: This transformation depends on your camera coordinate system
-            # This assumes depth increases in +Z, right is +X, down is +Y
-            # Adjust if your coordinate system is different
-            world_normals = np.copy(normals)
-            
-            # Set the normals in the point cloud
-            pcd.normals = o3d.utility.Vector3dVector(world_normals)
-            print(f"Applied {len(world_normals)} normals from normal map")
-        else:
-            # Estimate normals if no normal map provided
-            print("Estimating normals from point positions...")
-            pcd.estimate_normals(
-                search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*5, max_nn=30)
-            )
-            pcd.orient_normals_towards_camera_location(np.array([0, 0, 0]))
-        
-        # Apply statistical outlier removal
-        if len(points) > 100:  # Only if we have enough points
-            print("Removing statistical outliers...")
-            pcd, _ = pcd.remove_statistical_outlier(
-                nb_neighbors=20,
-                std_ratio=2.0
-            )
-            print(f"After outlier removal: {len(pcd.points)} points")
-        
-        # Apply normal-guided smoothing to flat areas
-        if normal_map is not None:
-            print("Applying normal-guided smoothing to improve flat regions...")
-            pcd = self._smooth_flat_regions(pcd, voxel_size)
-            
-        # Create mesh using Poisson surface reconstruction with adjusted parameters
-        # Normal maps allow for higher quality reconstruction
-        print("Generating mesh with Poisson reconstruction...")
-        poisson_depth = 9  # Default depth
-        if normal_map is not None:
-            poisson_depth = 10  # Increase depth for more detail when normals are available
-            
-        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, 
-            depth=poisson_depth,
-            scale=1.1,
-            linear_fit=True
-        )
-        
-        # Filter out low-density vertices with more aggressive filtering when using normals
-        density_threshold = 0.05  # Default threshold
-        if normal_map is not None:
-            density_threshold = 0.03  # More aggressive filtering with normal information
-            
-        if len(densities) > 0:
-            vertices_to_remove = densities < np.quantile(densities, density_threshold)
-            mesh.remove_vertices_by_mask(vertices_to_remove)
-        
-        # Clean up mesh
-        mesh.remove_degenerate_triangles()
-        mesh.remove_duplicated_triangles()
-        mesh.remove_duplicated_vertices()
-        mesh.remove_unreferenced_vertices()
-        
-        # Compute vertex normals for rendering with better normal consistency
-        if normal_map is not None:
-            # Use larger cone angle for smoother normal transitions
-            mesh.compute_vertex_normals(normalized=True)
-        else:
-            mesh.compute_vertex_normals()
         
         return {
             "mesh": mesh,
