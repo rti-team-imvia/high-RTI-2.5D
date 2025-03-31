@@ -426,3 +426,100 @@ def color_point_cloud_by_normals(point_cloud):
     point_cloud.colors = o3d.utility.Vector3dVector(colors)
     
     return point_cloud
+
+def visualize_point_cloud_with_normals(point_cloud, scale=0.05, sample_ratio=0.05, title="Point Cloud with Normals", save_path=None, show=True):
+    """
+    Visualize a point cloud with normal vectors displayed as arrows.
+    
+    Args:
+        point_cloud: open3d.geometry.PointCloud object with normals
+        scale: Length of the normal arrows relative to the scene size
+        sample_ratio: Ratio of points for which to display normals (to avoid cluttering)
+        title: Title for the visualization window
+        save_path: Optional path to save the visualization
+        show: Whether to display the visualization
+    """
+    if not isinstance(point_cloud, o3d.geometry.PointCloud):
+        raise ValueError("Input must be an Open3D PointCloud")
+        
+    if not point_cloud.has_normals():
+        print("Point cloud has no normals. Estimating normals...")
+        point_cloud.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
+        )
+        point_cloud.orient_normals_towards_camera_location(np.array([0, 0, 0]))
+    
+    # Sample points to avoid cluttering the visualization
+    total_points = len(point_cloud.points)
+    num_samples = max(1, int(total_points * sample_ratio))
+    indices = np.random.choice(np.arange(total_points), num_samples, replace=False)
+    
+    # Create a sampled point cloud for visualization
+    sampled_points = np.asarray(point_cloud.points)[indices]
+    sampled_normals = np.asarray(point_cloud.normals)[indices]
+    
+    # Create a LineSet to represent normal vectors as arrows
+    line_points = []
+    line_indices = []
+    
+    # Calculate bounding box diagonal for appropriate normal vector scale
+    bbox = point_cloud.get_axis_aligned_bounding_box()
+    bbox_size = np.linalg.norm(bbox.get_max_bound() - bbox.get_min_bound())
+    arrow_length = bbox_size * scale
+    
+    # Create line segments for the normals
+    for i, (point, normal) in enumerate(zip(sampled_points, sampled_normals)):
+        line_points.append(point)
+        line_points.append(point + normal * arrow_length)
+        line_indices.append([i*2, i*2+1])
+    
+    # Create LineSet and set colors to represent normal directions
+    normal_lines = o3d.geometry.LineSet()
+    normal_lines.points = o3d.utility.Vector3dVector(line_points)
+    normal_lines.lines = o3d.utility.Vector2iVector(line_indices)
+    
+    # Use bright red color for normal vectors
+    normal_colors = [[1, 0, 0] for _ in range(len(line_indices))]
+    normal_lines.colors = o3d.utility.Vector3dVector(normal_colors)
+    
+    # Create a visualization window
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(title, width=1024, height=768)
+    
+    # Add the point cloud
+    vis.add_geometry(point_cloud)
+    
+    # Add normal lines
+    vis.add_geometry(normal_lines)
+    
+    # Add coordinate frame
+    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        size=arrow_length * 3, origin=[0, 0, 0]
+    )
+    vis.add_geometry(coord_frame)
+    
+    # Configure the view
+    view_control = vis.get_view_control()
+    view_control.set_front([0, 0, -1])  # Face the camera along -Z direction
+    view_control.set_up([0, 1, 0])      # Y axis is up
+    
+    # Set rendering options
+    opt = vis.get_render_option()
+    opt.background_color = np.asarray([0.1, 0.1, 0.1])
+    opt.point_size = 2.0
+    
+    # Update the view
+    vis.poll_events()
+    vis.update_renderer()
+    
+    # Save screenshot if requested
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        vis.capture_screen_image(save_path)
+    
+    # Show if requested
+    if show:
+        vis.run()
+    
+    # Close the visualizer
+    vis.destroy_window()

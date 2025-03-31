@@ -145,6 +145,17 @@ def main():
     # Save in PLY format which preserves normals
     o3d.io.write_point_cloud(pcd_output_path, volume["point_cloud"])
     
+    # Add normal vector visualization
+    normal_vis_path = os.path.join(vis_output_dir, 'point_cloud_with_normals.png')
+    print(f"Creating visualization of point cloud with normal vectors to {normal_vis_path}")
+    visualize_point_cloud_with_normals(
+        volume["point_cloud"], 
+        scale=0.02,          # Adjust this to change arrow length
+        sample_ratio=0.01,   # Adjust this to show more or fewer arrows
+        save_path=normal_vis_path, 
+        show=True
+    )
+    
     print("Processing completed successfully!")
 
 if __name__ == '__main__':
