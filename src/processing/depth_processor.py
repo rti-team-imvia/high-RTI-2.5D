@@ -216,7 +216,7 @@ class DepthProcessor:
                     # Fill the hole with the mean depth
                     self.depth_map[hole_pixels] = mean_boundary_depth
     
-    def process_metric_depth(self, depth_map, mask=None, normal_map=None, camera_intrinsics=None):
+    def process_metric_depth(self, depth_map, mask=None):
         """
         Process a metric depth map with minimal modifications.
         For metric depth maps, we want to preserve the actual depth values.

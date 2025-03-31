@@ -75,6 +75,16 @@ def main():
         normal_vis_path = os.path.join(output_dir, 'normal_visualization.png')
         print(f"Visualizing normal map to {normal_vis_path}")
         visualize_normal_map(normal_map, save_path=normal_vis_path, show=False)
+        
+        # After loading the normal map:
+        if normal_map is not None:
+            print("Transforming normals from camera space to world space...")
+            normal_map = transform_normals_to_world_space_gpu(normal_map, camera_intrinsics)
+            
+            # Visualize the transformed normal map
+            transformed_normal_vis_path = os.path.join(output_dir, 'transformed_normal_visualization.png')
+            print(f"Visualizing transformed normal map to {transformed_normal_vis_path}")
+            visualize_normal_map(normal_map, save_path=transformed_normal_vis_path, show=False)
     
     # Load color image if available
     color_map = None
@@ -92,9 +102,7 @@ def main():
     depth_processor = DepthProcessor()
     processed_depth = depth_processor.process_metric_depth(
         depth_map, 
-        mask,
-        normal_map,  # Pass the normal map to correct depth inaccuracies
-        camera_intrinsics  # Pass the camera intrinsics for correct projection
+        mask
     )
     
     # Visualize the processed depth map with normal enhancement
@@ -150,8 +158,8 @@ def main():
     print(f"Creating visualization of point cloud with normal vectors to {normal_vis_path}")
     visualize_point_cloud_with_normals(
         volume["point_cloud"], 
-        scale=0.02,          # Adjust this to change arrow length
-        sample_ratio=0.01,   # Adjust this to show more or fewer arrows
+        scale=0.01,          # Adjust this to change arrow length
+        sample_ratio=0.001,   # Adjust this to show more or fewer arrows
         save_path=normal_vis_path, 
         show=True
     )
