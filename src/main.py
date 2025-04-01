@@ -15,7 +15,6 @@ from processing.volume_generator import VolumeGenerator
 from utils.file_io import *
 from utils.visualization import *
 from utils.gpu_utils import *
-from utils.verify_normals import *
 from camera.intrinsics import CameraIntrinsics
 
 def main():
