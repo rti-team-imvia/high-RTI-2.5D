@@ -14,6 +14,8 @@ from processing.depth_processor import DepthProcessor
 from processing.volume_generator import VolumeGenerator
 from utils.file_io import *
 from utils.visualization import *
+from utils.gpu_utils import *
+from utils.verify_normals import *
 from camera.intrinsics import CameraIntrinsics
 
 def main():
@@ -78,6 +80,7 @@ def main():
         
         # After loading the normal map:
         if normal_map is not None:
+            original_normal_map = normal_map.copy()  # Store the original normals
             print("Transforming normals from camera space to world space...")
             normal_map = transform_normals_to_world_space_gpu(normal_map, camera_intrinsics)
             
@@ -121,7 +124,7 @@ def main():
         color_map=color_map,  # Add this parameter
         voxel_size=0.001  # Adjust voxel size for resolution
     )
-    
+     
     # Save the volumetric mesh
     mesh_output_path = os.path.join(output_dir, 'reconstructed_mesh.obj')
     print(f"Saving volumetric mesh to {mesh_output_path}")
