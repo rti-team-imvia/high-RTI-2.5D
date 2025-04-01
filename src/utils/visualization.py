@@ -5,7 +5,7 @@ import open3d as o3d
 import os
 import cv2
 
-def visualize_depth_map(depth_map, normal_map=None, save_path=None, show=True):
+def visualize_depth_map(depth_map, normal_map=None, save_path=None, show=True, consider_flips=True):
     """
     Visualize a depth map.
     
@@ -14,20 +14,29 @@ def visualize_depth_map(depth_map, normal_map=None, save_path=None, show=True):
         normal_map: Optional normal map for enhanced visualization
         save_path: Optional path to save the visualization
         show: Whether to display the visualization
+        consider_flips: Whether to account for Y and Z flips in normal visualization
     """
     plt.figure(figsize=(12, 10))
     
     # If we have a normal map, create an enhanced visualization
     if normal_map is not None:
+        # Make a copy to avoid modifying the original
+        vis_normal_map = normal_map.copy()
+        
+        # Apply Y and Z flips for visualization if needed
+        if consider_flips:
+            vis_normal_map[:, :, 1] = -vis_normal_map[:, :, 1]  # Flip Y
+            vis_normal_map[:, :, 2] = -vis_normal_map[:, :, 2]  # Flip Z
+        
         plt.subplot(2, 2, 1)
         plt.imshow(depth_map, cmap='viridis')
         plt.colorbar(label='Depth (m)')
         plt.title('Depth Map')
         
-        # Visualize normals
+        # Visualize normals with proper flipping
         plt.subplot(2, 2, 2)
         # Convert to RGB by shifting from [-1,1] to [0,1] range
-        rgb_normals = (normal_map + 1.0) / 2.0
+        rgb_normals = (vis_normal_map + 1.0) / 2.0
         plt.imshow(rgb_normals)
         plt.title('Normal Map (RGB = XYZ)')
         
@@ -35,10 +44,10 @@ def visualize_depth_map(depth_map, normal_map=None, save_path=None, show=True):
         plt.subplot(2, 2, 3)
         
         # Use normals to create shaded relief
-        # Extract components from normal map
-        nx = normal_map[:,:,0]
-        ny = normal_map[:,:,1]
-        nz = normal_map[:,:,2]
+        # Extract components from normal map (use the flipped version)
+        nx = vis_normal_map[:,:,0]
+        ny = vis_normal_map[:,:,1]
+        nz = vis_normal_map[:,:,2]
         
         # Create a simple shading based on dot product with a light direction
         light_dir = np.array([0.5, 0.5, 0.7])  # Light from top-right
@@ -367,23 +376,51 @@ def visualize_depth_comparison(original_depth, processed_depth, mask=None, save_
     else:
         plt.close()
 
-def visualize_normal_map(normal_map, save_path=None, show=True):
+def visualize_normal_map(normal_map, save_path=None, show=True, consider_flips=True):
     """
-    Visualize a normal map as an RGB image.
+    Visualize a normal map as an RGB image with proper Y and Z flipping.
     
     Args:
         normal_map: 3D numpy array with shape [H, W, 3] containing XYZ normal vectors
         save_path: Optional path to save the visualization
         show: Whether to display the visualization
+        consider_flips: Whether to account for Y and Z flips in visualization
     """
     plt.figure(figsize=(10, 8))
     
+    # Make a copy to avoid modifying the original
+    vis_normals = normal_map.copy()
+    
+    # When displaying, we need to account for the Y and Z flips applied during loading
+    # This makes the visualization match the actual normal directions
+    if consider_flips:
+        # Flip Y and Z back for visualization to match common convention
+        vis_normals = vis_normals.copy()
+        vis_normals[:, :, 1] = -vis_normals[:, :, 1]  # Flip Y
+        vis_normals[:, :, 2] = -vis_normals[:, :, 2]  # Flip Z
+    
     # Convert normals from [-1,1] range to [0,1] for visualization
-    vis_normals = (normal_map + 1.0) / 2.0
+    vis_normals = (vis_normals + 1.0) / 2.0
     
     # Plot normal map
     plt.imshow(vis_normals)
     plt.title('Normal Map (RGB = XYZ)')
+    plt.colorbar(label='Normal Components')
+    
+    # Add annotation explaining the color coding with flip compensation
+    if consider_flips:
+        explanation = "Color Interpretation: Red = X, Green = -Y, Blue = -Z\n" + \
+                     "Bright red = surface facing right, dark red = surface facing left\n" + \
+                     "Bright green = surface facing up, dark green = surface facing down\n" + \
+                     "Bright blue = surface facing camera, dark blue = surface facing away"
+    else:
+        explanation = "Color Interpretation: Red = X, Green = Y, Blue = Z\n" + \
+                     "Bright red = surface facing right, dark red = surface facing left\n" + \
+                     "Bright green = surface facing down, dark green = surface facing up\n" + \
+                     "Bright blue = surface facing away, dark blue = surface facing camera"
+                     
+    plt.figtext(0.5, 0.01, explanation, ha="center", fontsize=9, 
+                bbox={"facecolor":"white", "alpha":0.5, "pad":5})
     
     # Save if requested
     if save_path:
@@ -396,13 +433,75 @@ def visualize_normal_map(normal_map, save_path=None, show=True):
     else:
         plt.close()
 
-def color_point_cloud_by_normals(point_cloud):
+def visualize_normal_map_comparison(original_map, transformed_map, save_path=None, show=True, consider_flips=True):
     """
-    Color a point cloud based on its normal directions.
-    Uses normal XYZ components mapped to RGB colors.
+    Compare original and transformed normal maps side by side with Y and Z flip compensation.
+    
+    Args:
+        original_map: Original normal map
+        transformed_map: Transformed normal map
+        save_path: Optional path to save the visualization
+        show: Whether to display the visualization
+        consider_flips: Whether to account for Y and Z flips for display
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
+    
+    # Make copies to avoid modifying originals
+    orig_vis = original_map.copy()
+    trans_vis = transformed_map.copy()
+    
+    # Apply visualization adjustments to match the loading transformations
+    if consider_flips:
+        # Flip Y and Z for visualization consistency
+        orig_vis[:, :, 1] = -orig_vis[:, :, 1]  # Flip Y
+        orig_vis[:, :, 2] = -orig_vis[:, :, 2]  # Flip Z
+        
+        trans_vis[:, :, 1] = -trans_vis[:, :, 1]  # Flip Y
+        trans_vis[:, :, 2] = -trans_vis[:, :, 2]  # Flip Z
+    
+    # Convert to [0,1] range for visualization
+    orig_vis = (orig_vis + 1.0) / 2.0
+    trans_vis = (trans_vis + 1.0) / 2.0
+    
+    # Original normal map
+    axes[0].imshow(orig_vis)
+    axes[0].set_title("Original Normal Map (Camera Space)")
+    
+    # Transformed normal map
+    axes[1].imshow(trans_vis)
+    axes[1].set_title("Transformed Normal Map (World Space)")
+    
+    # Add explanation with flip information
+    if consider_flips:
+        explanation = "Color Interpretation: Red = X, Green = -Y, Blue = -Z\n" + \
+                     "Note: Normal map colors are adjusted to account for Y/Z flips"
+    else:
+        explanation = "Color Interpretation: Red = X, Green = Y, Blue = Z\n" + \
+                     "Note: Normal map colors show raw values without flip compensation"
+    
+    plt.figtext(0.5, 0.01, explanation, ha="center", fontsize=10, 
+                bbox={"facecolor":"white", "alpha":0.5, "pad":5})
+    
+    plt.tight_layout()
+    
+    # Save if requested
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches='tight', dpi=150)
+    
+    # Show if requested
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+def color_point_cloud_by_normals(point_cloud, consider_flips=True):
+    """
+    Color a point cloud based on its normal directions with Y and Z flipping.
     
     Args:
         point_cloud: open3d.geometry.PointCloud object with normals
+        consider_flips: Whether to account for Y and Z flips in coloring
         
     Returns:
         open3d.geometry.PointCloud: Point cloud with colors
@@ -418,16 +517,31 @@ def color_point_cloud_by_normals(point_cloud):
     # Get the normal vectors
     normals = np.asarray(point_cloud.normals)
     
-    # Map normal directions to colors
-    # Convert from [-1, 1] range to [0, 1] range for RGB colors
-    colors = (normals + 1.0) / 2.0
+    # Make a copy of the point cloud to avoid modifying the input
+    colored_cloud = o3d.geometry.PointCloud(point_cloud)
+    
+    # Apply the same Y and Z flips for consistent visualization
+    if consider_flips:
+        normals_vis = normals.copy()
+        normals_vis[:, 1] = -normals_vis[:, 1]  # Flip Y
+        normals_vis[:, 2] = -normals_vis[:, 2]  # Flip Z
+    else:
+        normals_vis = normals
+    
+    # Map normal directions to colors (convert from [-1, 1] to [0, 1])
+    colors = (normals_vis + 1.0) / 2.0
     
     # Assign colors to the point cloud
-    point_cloud.colors = o3d.utility.Vector3dVector(colors)
+    colored_cloud.colors = o3d.utility.Vector3dVector(colors)
     
-    return point_cloud
+    return colored_cloud
 
-def visualize_point_cloud_with_normals(point_cloud, scale=0.05, sample_ratio=0.05, title="Point Cloud with Normals", save_path=None, show=True):
+def visualize_point_cloud_with_normals(point_cloud, scale=0.05, sample_ratio=0.05, 
+                                       title="Point Cloud with Normals", 
+                                       arrow_color=[1.0, 0.3, 0.0],  # Brighter orange
+                                       line_width=2.0,                # Thicker lines
+                                       save_path=None, show=True,
+                                       consider_flips=False):         # Don't flip for 3D arrows
     """
     Visualize a point cloud with normal vectors displayed as arrows.
     
@@ -436,18 +550,14 @@ def visualize_point_cloud_with_normals(point_cloud, scale=0.05, sample_ratio=0.0
         scale: Length of the normal arrows relative to the scene size
         sample_ratio: Ratio of points for which to display normals (to avoid cluttering)
         title: Title for the visualization window
+        arrow_color: RGB color for normal arrows
+        line_width: Width of normal arrows
         save_path: Optional path to save the visualization
         show: Whether to display the visualization
+        consider_flips: Whether to flip Y and Z components for arrows (usually not needed for 3D)
     """
-    if not isinstance(point_cloud, o3d.geometry.PointCloud):
-        raise ValueError("Input must be an Open3D PointCloud")
-        
-    if not point_cloud.has_normals():
-        print("Point cloud has no normals. Estimating normals...")
-        point_cloud.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
-        )
-        point_cloud.orient_normals_towards_camera_location(np.array([0, 0, 0]))
+    # Normal arrows shouldn't be flipped for 3D display - they need to point in the true direction,
+    # and the Y and Z flips are already accounted for when the normals are loaded and transformed
     
     # Sample points to avoid cluttering the visualization
     total_points = len(point_cloud.points)
@@ -478,8 +588,8 @@ def visualize_point_cloud_with_normals(point_cloud, scale=0.05, sample_ratio=0.0
     normal_lines.points = o3d.utility.Vector3dVector(line_points)
     normal_lines.lines = o3d.utility.Vector2iVector(line_indices)
     
-    # Use bright red color for normal vectors
-    normal_colors = [[1, 0, 0] for _ in range(len(line_indices))]
+    # Use custom arrow color for better visibility
+    normal_colors = [arrow_color for _ in range(len(line_indices))]
     normal_lines.colors = o3d.utility.Vector3dVector(normal_colors)
     
     # Create a visualization window
@@ -506,7 +616,8 @@ def visualize_point_cloud_with_normals(point_cloud, scale=0.05, sample_ratio=0.0
     # Set rendering options
     opt = vis.get_render_option()
     opt.background_color = np.asarray([0.1, 0.1, 0.1])
-    opt.point_size = 2.0
+    opt.point_size = 3.0
+    opt.line_width = line_width  # Set line width for all lines
     
     # Update the view
     vis.poll_events()

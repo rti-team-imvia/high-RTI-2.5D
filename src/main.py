@@ -87,6 +87,15 @@ def main():
             transformed_normal_vis_path = os.path.join(output_dir, 'transformed_normal_visualization.png')
             print(f"Visualizing transformed normal map to {transformed_normal_vis_path}")
             visualize_normal_map(normal_map, save_path=transformed_normal_vis_path, show=False)
+            
+            # Visualize comparison of original and transformed normal maps
+            print("Visualizing comparison of original and transformed normal maps...")
+            visualize_normal_map_comparison(
+                original_normal_map, 
+                normal_map, 
+                save_path=os.path.join(output_dir, 'normal_map_comparison.png'), 
+                show=False
+            )
     
     # Load color image if available
     color_map = None
@@ -110,7 +119,13 @@ def main():
     # Visualize the processed depth map with normal enhancement
     processed_vis_path = os.path.join(output_dir, 'processed_depth_visualization.png')
     print(f"Visualizing processed depth map to {processed_vis_path}")
-    visualize_depth_map(processed_depth, normal_map=normal_map, save_path=processed_vis_path, show=False)
+    visualize_depth_map(
+        processed_depth, 
+        normal_map=normal_map, 
+        save_path=processed_vis_path, 
+        show=False, 
+        consider_flips=True  # Add this parameter
+    )
     
     # Generate the volumetric representation
     print("Generating volumetric representation...")
