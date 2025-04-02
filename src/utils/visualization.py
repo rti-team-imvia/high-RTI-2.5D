@@ -634,3 +634,81 @@ def visualize_point_cloud_with_normals(point_cloud, scale=0.05, sample_ratio=0.0
     
     # Close the visualizer
     vis.destroy_window()
+
+def visualize_pbr_materials(color_map, roughness_map, metallic_map, save_path=None, show=True):
+    """
+    Visualize PBR material properties and a preview of how they combine.
+    
+    Args:
+        color_map: Base color texture (RGB)
+        roughness_map: Roughness map (grayscale)
+        metallic_map: Metallic map (grayscale)
+        save_path: Optional path to save visualization
+        show: Whether to display the visualization
+    """
+    plt.figure(figsize=(15, 10))
+    
+    # Show base color
+    plt.subplot(2, 2, 1)
+    plt.imshow(color_map)
+    plt.title('Base Color')
+    
+    # Show roughness
+    plt.subplot(2, 2, 2)
+    plt.imshow(roughness_map, cmap='gray')
+    plt.title('Roughness')
+    plt.colorbar(label='Roughness (0=smooth, 1=rough)')
+    
+    # Show metallic
+    plt.subplot(2, 2, 3)
+    plt.imshow(metallic_map, cmap='gray')
+    plt.title('Metallic')
+    plt.colorbar(label='Metallic (0=dielectric, 1=metal)')
+    
+    # Create PBR preview (simplified)
+    plt.subplot(2, 2, 4)
+    
+    # Simple PBR preview algorithm:
+    # - Metallic areas use base color for reflection color
+    # - Non-metallic areas use base color for diffuse
+    # - Roughness affects the brightness/contrast
+    
+    # Normalize to [0,1] if needed
+    if color_map.dtype == np.uint8:
+        color_preview = color_map.astype(np.float32) / 255.0
+    else:
+        color_preview = color_map.copy()
+        
+    metallic_preview = metallic_map.copy()
+    roughness_preview = roughness_map.copy()
+    
+    # Apply simplified PBR preview
+    # For metallic areas: increase brightness, add "shine"
+    shine = np.ones_like(color_preview) * (1.0 - roughness_preview)[..., np.newaxis]
+    metallic_effect = metallic_preview[..., np.newaxis] * shine
+    
+    # Apply metallic shine
+    pbr_preview = color_preview + metallic_effect * 0.5
+    
+    # For non-metallic: roughness darkens
+    roughness_effect = (1.0 - metallic_preview)[..., np.newaxis] * roughness_preview[..., np.newaxis] * 0.3
+    pbr_preview = pbr_preview - roughness_effect
+    
+    # Clamp to valid range
+    pbr_preview = np.clip(pbr_preview, 0, 1)
+    
+    plt.imshow(pbr_preview)
+    plt.title('PBR Preview (simplified)')
+    
+    plt.tight_layout()
+    
+    # Save if requested
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches='tight', dpi=150)
+    
+    # Show if requested
+    if show:
+        plt.show()
+    else:
+        plt.close()

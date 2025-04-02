@@ -339,32 +339,201 @@ def transform_normals_to_world_space_gpu(normal_map, intrinsics):
     # Return as numpy array
     return world_normals.cpu().numpy()
 
-def save_volume(volume, file_path):
+def save_volume(volume, file_path, save_point_cloud=False):
     """
-    Save a volumetric representation to a file.
+    Save a volumetric representation to a file with material properties.
     
     Args:
         volume: Dictionary containing volumetric data
         file_path: Path where to save the volume
+        save_point_cloud: Whether to save the point cloud separately (default: False)
     """
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     
-    # Get the mesh from the volume
+    # Get the mesh and point cloud
     mesh = volume["mesh"]
+    pcd = volume["point_cloud"]
     
-    # Save as OBJ file if file_path is an OBJ file
+    # Create MTL file for material properties if path is OBJ
     if file_path.lower().endswith('.obj'):
-        o3d.io.write_triangle_mesh(file_path, mesh)
+        mtl_path = os.path.splitext(file_path)[0] + ".mtl"
+        mtl_name = os.path.splitext(os.path.basename(file_path))[0]
+        
+        # Write MTL file with PBR properties
+        with open(mtl_path, 'w') as f:
+            f.write(f"# Material definition for {mtl_name}\n")
+            f.write(f"newmtl material0\n")
+            f.write("Ka 1.0 1.0 1.0\n")  # Ambient color
+            f.write("Kd 1.0 1.0 1.0\n")  # Diffuse color
+            f.write("Ks 1.0 1.0 1.0\n")  # Specular color
+            
+            # Add PBR properties if available
+            material_props = volume.get("material_properties", {})
+            if "roughness" in material_props:
+                avg_roughness = np.mean(material_props["roughness"])
+                f.write(f"Pr {avg_roughness:.6f}\n")  # PBR roughness
+            else:
+                f.write("Pr 0.5\n")  # Default roughness
+                
+            if "metallic" in material_props:
+                avg_metallic = np.mean(material_props["metallic"])
+                f.write(f"Pm {avg_metallic:.6f}\n")  # PBR metallic
+            else:
+                f.write("Pm 0.0\n")  # Default metallic
+        
+        # Save OBJ with material reference
+        o3d.io.write_triangle_mesh(file_path, mesh, write_vertex_normals=True, 
+                                  write_vertex_colors=True, write_triangle_uvs=True)
+        
     elif file_path.lower().endswith('.ply'):
-        o3d.io.write_triangle_mesh(file_path, mesh)
+        # PLY format can embed some material properties
+        o3d.io.write_triangle_mesh(file_path, mesh, write_vertex_normals=True, 
+                                 write_vertex_colors=True)
     else:
         # Default to PLY if not specified
         ply_path = file_path if file_path.lower().endswith('.ply') else f"{os.path.splitext(file_path)[0]}.ply"
-        o3d.io.write_triangle_mesh(ply_path, mesh)
-        
-        # Also save the point cloud
+        o3d.io.write_triangle_mesh(ply_path, mesh, write_vertex_normals=True, 
+                                 write_vertex_colors=True)
+    
+    # Save the point cloud with all properties only if requested
+    if save_point_cloud:
         pcd_path = f"{os.path.splitext(file_path)[0]}_points.ply"
-        o3d.io.write_point_cloud(pcd_path, volume["point_cloud"])
+        o3d.io.write_point_cloud(pcd_path, pcd)
+        print(f"Saved point cloud to {pcd_path}")
+    
+    print(f"Saved mesh to {file_path}")
+
+def save_to_gltf(volume, file_path, save_point_cloud=True, use_binary=True, use_draco=False):
+    """
+    Save a volumetric representation to glTF format, supporting PBR materials.
+    
+    Args:
+        volume: Dictionary containing volumetric data
+        file_path: Path where to save the glTF file (without extension)
+        save_point_cloud: Whether to save the point cloud separately
+        use_binary: Save as binary GLB instead of text glTF (more efficient)
+        use_draco: Use Draco mesh compression (requires draco installed)
+    """
+    import trimesh
+    import numpy as np
+    
+    # Make sure output directory exists
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    # Get mesh and point cloud
+    o3d_mesh = volume["mesh"]
+    o3d_point_cloud = volume["point_cloud"]
+    
+    # Get material properties
+    material_props = volume.get("material_properties", {})
+    
+    # Convert Open3D mesh to trimesh
+    vertices = np.asarray(o3d_mesh.vertices)
+    faces = np.asarray(o3d_mesh.triangles)
+    
+    print(f"Converting mesh with {len(vertices)} vertices and {len(faces)} faces to glTF")
+    
+    # Create trimesh mesh
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+    
+    # Add vertex normals if available
+    if o3d_mesh.has_vertex_normals():
+        mesh.vertex_normals = np.asarray(o3d_mesh.vertex_normals)
+    
+    # Add vertex colors if available
+    if o3d_mesh.has_vertex_colors():
+        colors = np.asarray(o3d_mesh.vertex_colors)
+        # Convert from [0,1] to [0,255] for trimesh
+        colors = (colors * 255).astype(np.uint8)
+        mesh.visual.vertex_colors = colors
+    
+    # Create PBR material for the mesh
+    pbr_material = trimesh.visual.material.PBRMaterial(
+        name="material0",
+        baseColorFactor=[1.0, 1.0, 1.0, 1.0],  # Use vertex colors for base color
+        metallicFactor=material_props.get("metallic", np.array([0.0])).mean() if "metallic" in material_props else 0.0,
+        roughnessFactor=material_props.get("roughness", np.array([0.5])).mean() if "roughness" in material_props else 0.5
+    )
+    
+    # Apply material to mesh
+    mesh.visual.material = pbr_material
+    
+    # Determine file type and extension
+    file_type = 'glb' if use_binary else 'gltf'
+    export_ext = '.glb' if use_binary else '.gltf'
+    mesh_path = f"{file_path}{export_ext}"
+    
+    # Create export options
+    export_options = {}
+    if use_draco:
+        export_options['draco'] = {'quantization_bits': 14}
+    
+    # Create a scene and add mesh
+    scene = trimesh.Scene()
+    scene.add_geometry(mesh)
+    
+    # Export the scene
+    scene.export(mesh_path, file_type=file_type, **export_options)
+    print(f"Saved mesh with PBR materials to {mesh_path} ({os.path.getsize(mesh_path)/1024/1024:.2f} MB)")
+    
+    # Now create point cloud as a glTF if requested
+    if save_point_cloud and o3d_point_cloud is not None:
+        # Instead of trying to export full point cloud, which causes issues
+        # Save a downsampled version that works in web viewers
+        
+        # Get total points
+        num_points = len(np.asarray(o3d_point_cloud.points))
+        max_points = 10000000  # Max points supported by most viewers
+        
+        # If we need to downsample
+        if num_points > max_points:
+            print(f"WARNING: Point cloud has {num_points:,} points, which exceeds the " 
+                  f"recommended limit of {max_points:,} for glTF viewers.")
+            print(f"Saving full resolution as PLY, downsampled as {file_type}")
+            
+            # Calculate voxel size to achieve target point count (approximate)
+            target_ratio = max_points / num_points
+            voxel_size = 0.01 * (1 / (target_ratio ** (1/3)))
+            
+            # Save full resolution to PLY
+            pcd_full_path = f"{file_path}_points_full.ply"
+            o3d.io.write_point_cloud(pcd_full_path, o3d_point_cloud)
+            print(f"Saved full resolution point cloud to {pcd_full_path}")
+            
+            # Downsample using voxel grid
+            pcd_for_gltf = o3d_point_cloud.voxel_down_sample(voxel_size=voxel_size)
+            
+            # Get actual downsampled point count
+            down_points = len(np.asarray(pcd_for_gltf.points))
+            print(f"Downsampled to {down_points:,} points for {file_type} export")
+        else:
+            pcd_for_gltf = o3d_point_cloud
+        
+        # Convert to trimesh points
+        points = np.asarray(pcd_for_gltf.points)
+        
+        # Create point cloud as a special trimesh pointcloud
+        point_cloud = trimesh.points.PointCloud(points)
+        
+        # Add colors if available
+        if pcd_for_gltf.has_colors():
+            colors = np.asarray(pcd_for_gltf.colors)
+            # Convert from [0,1] to [0,255] for trimesh
+            colors = (colors * 255).astype(np.uint8)
+            point_cloud.colors = colors
+        
+        # Export point cloud
+        pc_path = f"{file_path}_points{export_ext}"
+        
+        # Create a scene with the point cloud
+        pc_scene = trimesh.Scene()
+        pc_scene.add_geometry(point_cloud)
+        
+        # Export the scene
+        pc_scene.export(pc_path, file_type=file_type)
+        print(f"Saved point cloud to {pc_path} ({os.path.getsize(pc_path)/1024/1024:.2f} MB)")
+    
+    return mesh_path
 
 def load_intrinsics(file_path):
     """
@@ -397,3 +566,91 @@ def save_intrinsics(intrinsics, file_path):
     
     with open(file_path, 'w') as f:
         json.dump(intrinsics.to_dict(), f, indent=4)
+
+def save_extended_ply(point_cloud, file_path, material_properties=None):
+    """
+    Save point cloud to PLY format with extended properties for PBR materials.
+    
+    Args:
+        point_cloud: open3d.geometry.PointCloud object
+        file_path: Output file path (.ply)
+        material_properties: Dictionary with additional properties like 'roughness' and 'metallic'
+    """
+    import open3d as o3d
+    import numpy as np
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    # Get point cloud data
+    points = np.asarray(point_cloud.points)
+    num_points = len(points)
+    
+    # Check if we have material properties
+    has_roughness = material_properties is not None and 'roughness' in material_properties
+    has_metallic = material_properties is not None and 'metallic' in material_properties
+    
+    # Start writing PLY file
+    with open(file_path, 'w') as f:
+        # Write header
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {num_points}\n")
+        
+        # Position properties
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        
+        # Normal properties if available
+        if point_cloud.has_normals():
+            f.write("property float nx\n")
+            f.write("property float ny\n")
+            f.write("property float nz\n")
+        
+        # Color properties if available
+        if point_cloud.has_colors():
+            f.write("property float red\n")
+            f.write("property float green\n")
+            f.write("property float blue\n")
+        
+        # Material properties
+        if has_roughness:
+            f.write("property float roughness\n")
+        if has_metallic:
+            f.write("property float metallic\n")
+        
+        f.write("end_header\n")
+        
+        # Write vertex data
+        normals = np.asarray(point_cloud.normals) if point_cloud.has_normals() else None
+        colors = np.asarray(point_cloud.colors) if point_cloud.has_colors() else None
+        
+        # Get material data
+        roughness_values = material_properties['roughness'] if has_roughness else None
+        metallic_values = material_properties['metallic'] if has_metallic else None
+        
+        for i in range(num_points):
+            # Write position
+            f.write(f"{points[i,0]} {points[i,1]} {points[i,2]}")
+            
+            # Write normals
+            if normals is not None:
+                f.write(f" {normals[i,0]} {normals[i,1]} {normals[i,2]}")
+            
+            # Write colors
+            if colors is not None:
+                f.write(f" {colors[i,0]} {colors[i,1]} {colors[i,2]}")
+            
+            # Write roughness
+            if has_roughness:
+                f.write(f" {roughness_values[i]}")
+            
+            # Write metallic
+            if has_metallic:
+                f.write(f" {metallic_values[i]}")
+            
+            f.write("\n")
+    
+    print(f"Saved extended PLY with material properties to {file_path}")
+    return file_path

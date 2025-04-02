@@ -24,7 +24,8 @@ class VolumeGenerator:
         if self.selective_gpu:
             print(f"Using selective GPU acceleration for point cloud generation")
     
-    def depth_to_point_cloud(self, depth_map, mask=None, normal_map=None, color_map=None, camera_offset=0.5):
+    def depth_to_point_cloud(self, depth_map, mask=None, normal_map=None, color_map=None, 
+                        roughness_map=None, metallic_map=None):
         """
         Convert a depth map to a point cloud using camera intrinsics.
         The camera is positioned at (0,0,0) looking down the positive Z axis.
@@ -68,11 +69,7 @@ class VolumeGenerator:
         u_valid = u[valid_pixels]
         v_valid = v[valid_pixels]
         z = depth_map[valid_pixels]
-        
-        # Scale the depth values to appropriate range if needed
-        # Add an offset to ensure all points are in front of the camera
-        z = z + camera_offset
-        
+          
         print(f"Depth range after offset: {np.min(z)} to {np.max(z)}")
             
         # Calculate 3D coordinates using pinhole camera model
@@ -114,15 +111,26 @@ class VolumeGenerator:
             pcd.colors = o3d.utility.Vector3dVector(colors)
             print(f"Applied {len(colors)} colors from color map")
         
-        # Apply additional statistical outlier removal to clean up the point cloud
-        pcd, _ = pcd.remove_statistical_outlier(
-            nb_neighbors=30,
-            std_ratio=2.0  # More aggressive outlier removal
-        )
-        
-        return pcd
+        # Create a material properties dictionary
+        material_info = {}
 
-    def depth_to_point_cloud_gpu(self, depth_map, mask=None, normal_map=None, color_map=None):
+        # Add roughness values if available
+        if roughness_map is not None and roughness_map.shape[:2] == depth_map.shape:
+            roughness_values = roughness_map[valid_pixels]
+            material_info["roughness"] = roughness_values
+            print(f"Added {len(roughness_values)} roughness values")
+
+        # Add metallic values if available
+        if metallic_map is not None and metallic_map.shape[:2] == depth_map.shape:
+            metallic_values = metallic_map[valid_pixels]
+            material_info["metallic"] = metallic_values
+            print(f"Added {len(metallic_values)} metallic values")
+
+        # Return point cloud and material info
+        return pcd, material_info if material_info else pcd
+
+    def depth_to_point_cloud_gpu(self, depth_map, mask=None, normal_map=None, color_map=None,
+                            roughness_map=None, metallic_map=None):
         """
         GPU-accelerated conversion of depth map to point cloud.
         Only uses GPU for the coordinate calculation which is highly parallel.
@@ -218,40 +226,78 @@ class VolumeGenerator:
             pcd.colors = o3d.utility.Vector3dVector(colors)
             print(f"Applied {len(colors)} colors from color map")
         
-        return pcd
+        # Create a material properties dictionary
+        material_info = {}
+
+        # Add roughness values if available
+        if roughness_map is not None and roughness_map.shape[:2] == depth_map.shape:
+            valid_y = valid_indices[0].cpu().numpy()
+            valid_x = valid_indices[1].cpu().numpy()
+            roughness_values = roughness_map[valid_y, valid_x]
+            material_info["roughness"] = roughness_values
+            print(f"Added {len(roughness_values)} roughness values")
+
+        # Add metallic values if available
+        if metallic_map is not None and metallic_map.shape[:2] == depth_map.shape:
+            valid_y = valid_indices[0].cpu().numpy()
+            valid_x = valid_indices[1].cpu().numpy()
+            metallic_values = metallic_map[valid_y, valid_x]
+            material_info["metallic"] = metallic_values
+            print(f"Added {len(metallic_values)} metallic values")
+
+        # Return point cloud and material info
+        return pcd, material_info if material_info else pcd
     
-    def create_volume_from_metric_depth(self, depth_map, mask=None, normal_map=None, color_map=None, voxel_size=0.01):
+    def create_volume_from_metric_depth(self, depth_map, mask=None, normal_map=None, color_map=None, 
+                                   roughness_map=None, metallic_map=None, voxel_size=0.01):
         """
-        Create a volumetric representation from a metric depth map.
-        Optionally uses normal map for improved reconstruction.
+        Create a point cloud from a metric depth map with material properties.
+        Skips mesh generation to focus on high-quality point cloud with normals.
         
         Args:
             depth_map: 2D numpy array with metric depth values
             mask: Optional binary mask to filter valid regions
             normal_map: Optional 3D numpy array with normal vectors (shape [H, W, 3])
             color_map: Optional color map for point cloud coloring
-            voxel_size: Size of voxels in the volumetric representation
+            roughness_map: Optional roughness map (grayscale) for PBR materials
+            metallic_map: Optional metallic map (grayscale) for PBR materials
+            voxel_size: Size of voxels for potential downsampling
             
         Returns:
-            dict: Dictionary containing the volumetric mesh and point cloud
+            dict: Dictionary containing the point cloud with materials
         """
         # Generate point cloud
         if self.selective_gpu:
             # Use GPU for the parallelizable coordinates calculation
             print("Using GPU-accelerated point cloud generation...")
-            pcd = self.depth_to_point_cloud_gpu(depth_map, mask, normal_map, color_map)
+            result = self.depth_to_point_cloud_gpu(depth_map, mask, normal_map, color_map, roughness_map, metallic_map)
+            
+            # Check if we got a tuple with material info
+            if isinstance(result, tuple):
+                pcd, material_info = result
+            else:
+                pcd = result
+                material_info = {}
         else:
             # Use CPU implementation
             print("Using CPU point cloud generation...")
-            pcd = self.depth_to_point_cloud(depth_map, mask, normal_map, color_map)
+            result = self.depth_to_point_cloud(depth_map, mask, normal_map, color_map, roughness_map, metallic_map)
+            
+            # Check if we got a tuple with material info
+            if isinstance(result, tuple):
+                pcd, material_info = result
+            else:
+                pcd = result
+                material_info = {}
         
         # Check if point cloud has enough points
         if len(pcd.points) < 10:
-            print("ERROR: Not enough valid points to create a volumetric representation")
-            # Return empty volume
+            print("ERROR: Not enough valid points to create a point cloud")
+            # Return empty result
             return {
-                "mesh": o3d.geometry.TriangleMesh(),
+                "mesh": o3d.geometry.TriangleMesh(),  # Empty mesh
                 "point_cloud": pcd,
+                "material_properties": material_info,
                 "voxel_size": voxel_size
             }
         
@@ -262,52 +308,29 @@ class VolumeGenerator:
             std_ratio=2.0
         )
         
-        # Report on the number of points being used
-        print(f"Using full resolution point cloud with {len(pcd.points)} points")
+        # Ensure normals are properly oriented
+        if pcd.has_normals():
+            print("Ensuring normals are properly oriented...")
+            pcd.orient_normals_towards_camera_location(np.array([0, 0, 0]))
         
-        # Create mesh using Poisson surface reconstruction
-        print("Generating mesh with Poisson reconstruction...")
-        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, 
-            depth=9,
-            scale=1.1,
-            linear_fit=True
-        )
+        # Report on the final point cloud
+        print(f"Final point cloud has {len(pcd.points)} points with:")
+        if pcd.has_normals():
+            print(f"- Normal vectors")
+        if pcd.has_colors():
+            print(f"- Color information")
+        if "roughness" in material_info:
+            print(f"- Roughness values")
+        if "metallic" in material_info:
+            print(f"- Metallic values")
         
-        # Filter out low-density vertices
-        if len(densities) > 0:
-            # Convert densities to numpy array before division
-            densities_np = np.asarray(densities)
-            
-            # Now we can safely perform operations on the numpy array
-            if np.max(densities_np) > 0:  # Prevent division by zero
-                density_colors = plt.cm.plasma(densities_np / np.max(densities_np))[:, :3]
-                
-                density_mesh = o3d.geometry.TriangleMesh()
-                density_mesh.vertices = mesh.vertices
-                density_mesh.triangles = mesh.triangles
-                density_mesh.vertex_colors = o3d.utility.Vector3dVector(density_colors)
-                
-                # Remove vertices with low density
-                threshold = np.quantile(densities_np, 0.1)
-                print(f"Removing vertices with density < {threshold:.6f}")
-                vertices_to_remove = densities_np < threshold
-                mesh.remove_vertices_by_mask(vertices_to_remove)
-            else:
-                print("Warning: All density values are zero, skipping density filtering")
-        
-        # Clean up mesh
-        print("Cleaning up mesh...")
-        mesh.remove_degenerate_triangles()
-        mesh.remove_duplicated_triangles()
-        mesh.remove_duplicated_vertices()
-        mesh.remove_unreferenced_vertices()
-        
-        # Compute vertex normals for rendering
-        mesh.compute_vertex_normals()
+        # Create empty mesh - we're not generating a mesh but keeping the return structure
+        # for compatibility with existing code
+        empty_mesh = o3d.geometry.TriangleMesh()
         
         return {
-            "mesh": mesh,
+            "mesh": empty_mesh,  # Empty mesh
             "point_cloud": pcd,
+            "material_properties": material_info,
             "voxel_size": voxel_size
         }
