@@ -183,6 +183,17 @@ def main():
         metallic_map=metallic_map,
         voxel_size=0.001
     )
+    
+    # First, after VolumeGenerator creates the point cloud, update material properties
+    if 'material_properties' in volume and volume["point_cloud"] is not None:
+        # Check and fix material property sizes to match point count
+        num_points = len(volume["point_cloud"].points)
+        for prop_name in list(volume['material_properties'].keys()):
+            if len(volume['material_properties'][prop_name]) != num_points:
+                print(f"Warning: Material property {prop_name} size doesn't match point count.")
+                print(f"Regenerating {prop_name} property for filtered point cloud...")
+                # Remove the mismatched property
+                volume['material_properties'].pop(prop_name)
      
     # Save the volumetric mesh in different formats
     print("Visualizing volumetric representation to {}".format(vis_output_dir))
@@ -204,25 +215,11 @@ def main():
         print("Using original colors from texture for point cloud")
 
     # Save the extended PLY with material properties
-    save_extended_ply(
+    save_extended_ply_with_plyfile(
         volume["point_cloud"],
         pcd_output_path,
         material_properties=volume.get("material_properties", {})
     )
-    
-    # 3. Save point cloud in PLY format
-    pcd_output_path = os.path.join(output_dir, 'point_cloud.ply')
-    print(f"Saving point cloud with normals to {pcd_output_path}")
-    
-    # Apply normal-based coloring if needed
-    if not volume["point_cloud"].has_colors():
-        print("No color data available, coloring by normals instead")
-        volume["point_cloud"] = color_point_cloud_by_normals(volume["point_cloud"])
-    else:
-        print("Using original colors from texture for point cloud")
-    
-    # Save the point cloud
-    o3d.io.write_point_cloud(pcd_output_path, volume["point_cloud"])
     
     # Create camera-point debug visualization
     camera_vis_path = os.path.join(vis_output_dir, 'camera_and_points.png')

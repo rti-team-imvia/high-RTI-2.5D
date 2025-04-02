@@ -33,7 +33,6 @@ def load_depth_map(file_path):
             # For 32-bit float TIFFs, assume values are already in metric units
             if depth_map.dtype == np.float32 or depth_map.dtype == np.float64:
                 print(f"Detected floating-point depth map, assuming values are already in meters")
-                # Convert to float32 for consistency
                 depth_map = depth_map.astype(np.float32)
             return depth_map
             
@@ -50,7 +49,6 @@ def load_depth_map(file_path):
         
         # If image has multiple channels, convert to single channel
         if len(depth_map.shape) > 2:
-            # Use the first channel or convert to grayscale
             depth_map = cv2.cvtColor(depth_map, cv2.COLOR_BGR2GRAY)
         
         # Process based on bit depth
@@ -60,7 +58,6 @@ def load_depth_map(file_path):
         if depth_map.dtype == np.float32 or depth_map.dtype == np.float64:
             # For floating point, assume values are already in meters
             print("Detected floating-point depth map, assuming values are already in meters")
-            # Just ensure float32 for consistency
             depth_map = depth_map.astype(np.float32)
         elif depth_map.dtype == np.uint16:
             # 16-bit depth, normalize to meters assuming typical depth sensor range
@@ -158,9 +155,108 @@ def load_normal_map(file_path, convert_bgr_to_rgb=True, flip_y=True, flip_z=True
     
     return normal_map
 
+def transform_normals_to_world_space_gpu(normal_map, intrinsics):
+    """
+    GPU-accelerated transformation of normals from camera space to world space.
+    Fully vectorized implementation for maximum GPU performance.
+    
+    Args:
+        normal_map: Normal map in camera space (H, W, 3)
+        intrinsics: Camera intrinsics object
+        
+    Returns:
+        numpy.ndarray: Transformed normals in world space
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            print("Using GPU for normal transformation...")
+        else:
+            device = torch.device("cpu")
+            print("No GPU available, using CPU for normal transformation...")
+    except ImportError:
+        print("PyTorch not installed, falling back to CPU implementation...")
+        return transform_normals_to_world_space(normal_map, intrinsics)
+    
+    height, width = normal_map.shape[:2]
+    
+    # Move data to GPU
+    normal_tensor = torch.tensor(normal_map, device=device, dtype=torch.float32)
+    
+    # Create coordinate grid
+    v, u = torch.meshgrid(
+        torch.arange(height, device=device, dtype=torch.float32),
+        torch.arange(width, device=device, dtype=torch.float32),
+        indexing='ij'  # Specify indexing to avoid warning
+    )
+    
+    # Calculate ray directions for each pixel (vectorized)
+    fx, fy = intrinsics.fx, intrinsics.fy
+    cx, cy = intrinsics.cx, intrinsics.cy
+    
+    # Calculate ray direction in camera space
+    x = (u - cx) / fx
+    y = (v - cy) / fy
+    z = torch.ones_like(x, device=device)
+    
+    # Normalize ray directions (vectorized)
+    ray_lengths = torch.sqrt(x**2 + y**2 + 1)
+    x = x / ray_lengths
+    y = y / ray_lengths
+    z = z / ray_lengths
+    
+    # Stack for z_axis
+    z_axis = torch.stack([x, y, z], dim=-1)
+    
+    # Create up vector tensor (broadcast to all pixels)
+    up_vector = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=torch.float32)
+    up_vector = up_vector.reshape(1, 1, 3).expand(height, width, 3)
+    
+    # Handle special case where ray is parallel to up vector
+    # Compute dot product between z_axis and up_vector
+    dot_product = (z_axis * up_vector).sum(dim=-1, keepdim=True)
+    parallel_mask = torch.abs(dot_product) > 0.99
+    
+    # Create alternative up vector for parallel cases
+    alt_up_vector = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=torch.float32)
+    alt_up_vector = alt_up_vector.reshape(1, 1, 3).expand(height, width, 3)
+    
+    # Apply mask to select between primary and alternative up vectors
+    effective_up = torch.where(parallel_mask.expand(-1, -1, 3), alt_up_vector, up_vector)
+    
+    # Compute x_axis using cross product (vectorized)
+    x_axis = torch.linalg.cross(effective_up, z_axis, dim=-1)
+    x_axis_norm = torch.norm(x_axis, dim=-1, keepdim=True)
+    x_axis = x_axis / (x_axis_norm + 1e-10)  # Avoid division by zero
+    
+    # Compute y_axis using cross product (vectorized)
+    y_axis = torch.linalg.cross(z_axis, x_axis, dim=-1)
+    y_axis_norm = torch.norm(y_axis, dim=-1, keepdim=True)
+    y_axis = y_axis / (y_axis_norm + 1e-10)  # Avoid division by zero
+    
+    # Create rotation matrices for all pixels (H×W×3×3)
+    rotation_matrices = torch.stack([x_axis, y_axis, z_axis], dim=-1)
+    
+    # Reshape normal_tensor to allow for batch matrix multiplication
+    normals_reshaped = normal_tensor.reshape(height * width, 3, 1)
+    rotation_matrices_reshaped = rotation_matrices.reshape(height * width, 3, 3)
+    
+    # Perform batch matrix multiplication (H*W matrix multiplications at once)
+    world_normals_reshaped = torch.bmm(rotation_matrices_reshaped, normals_reshaped)
+    
+    # Reshape and normalize
+    world_normals = world_normals_reshaped.reshape(height, width, 3)
+    world_normals_norm = torch.norm(world_normals, dim=-1, keepdim=True)
+    world_normals = world_normals / (world_normals_norm + 1e-10)
+    
+    # Return as numpy array
+    return world_normals.cpu().numpy()
+
 def transform_normals_to_world_space(normal_map, intrinsics):
     """
     Transform normals from camera space to world space.
+    CPU fallback version when GPU is not available.
     
     Args:
         normal_map: Normal map in camera space (H, W, 3)
@@ -239,106 +335,6 @@ def transform_normals_to_world_space(normal_map, intrinsics):
     
     return world_normals
 
-
-
-def transform_normals_to_world_space_gpu(normal_map, intrinsics):
-    """
-    GPU-accelerated transformation of normals from camera space to world space.
-    Fully vectorized implementation for maximum GPU performance.
-    
-    Args:
-        normal_map: Normal map in camera space (H, W, 3)
-        intrinsics: Camera intrinsics object
-        
-    Returns:
-        numpy.ndarray: Transformed normals in world space
-    """
-    try:
-        import torch
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            print("Using GPU for normal transformation...")
-        else:
-            device = torch.device("cpu")
-            print("No GPU available, using CPU for normal transformation...")
-    except ImportError:
-        print("PyTorch not installed, using CPU implementation...")
-        return transform_normals_to_world_space(normal_map, intrinsics)
-    
-    height, width = normal_map.shape[:2]
-    
-    # Move data to GPU
-    normal_tensor = torch.tensor(normal_map, device=device, dtype=torch.float32)
-    
-    # Create coordinate grid
-    v, u = torch.meshgrid(
-        torch.arange(height, device=device, dtype=torch.float32),
-        torch.arange(width, device=device, dtype=torch.float32),
-        indexing='ij'  # Specify indexing to avoid warning
-    )
-    
-    # Calculate ray directions for each pixel (vectorized)
-    fx, fy = intrinsics.fx, intrinsics.fy
-    cx, cy = intrinsics.cx, intrinsics.cy
-    
-    # Calculate ray direction in camera space
-    x = (u - cx) / fx
-    y = (v - cy) / fy
-    z = torch.ones_like(x, device=device)
-    
-    # Normalize ray directions (vectorized)
-    ray_lengths = torch.sqrt(x**2 + y**2 + 1)
-    x = x / ray_lengths
-    y = y / ray_lengths
-    z = z / ray_lengths
-    
-    # Stack for z_axis
-    z_axis = torch.stack([x, y, z], dim=-1)
-    
-    # Create up vector tensor (broadcast to all pixels)
-    up_vector = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=torch.float32)
-    up_vector = up_vector.reshape(1, 1, 3).expand(height, width, 3)
-    
-    # Handle special case where ray is parallel to up vector
-    # Compute dot product between z_axis and up_vector
-    dot_product = (z_axis * up_vector).sum(dim=-1, keepdim=True)
-    parallel_mask = torch.abs(dot_product) > 0.99
-    
-    # Create alternative up vector for parallel cases
-    alt_up_vector = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=torch.float32)
-    alt_up_vector = alt_up_vector.reshape(1, 1, 3).expand(height, width, 3)
-    
-    # Apply mask to select between primary and alternative up vectors
-    effective_up = torch.where(parallel_mask.expand(-1, -1, 3), alt_up_vector, up_vector)
-    
-    # Compute x_axis using cross product (vectorized)
-    x_axis = torch.linalg.cross(effective_up, z_axis, dim=-1)
-    x_axis_norm = torch.norm(x_axis, dim=-1, keepdim=True)
-    x_axis = x_axis / (x_axis_norm + 1e-10)  # Avoid division by zero
-    
-    # Compute y_axis using cross product (vectorized)
-    y_axis = torch.linalg.cross(z_axis, x_axis, dim=-1)
-    y_axis_norm = torch.norm(y_axis, dim=-1, keepdim=True)
-    y_axis = y_axis / (y_axis_norm + 1e-10)  # Avoid division by zero
-    
-    # Create rotation matrices for all pixels (H×W×3×3)
-    rotation_matrices = torch.stack([x_axis, y_axis, z_axis], dim=-1)
-    
-    # Reshape normal_tensor to allow for batch matrix multiplication
-    normals_reshaped = normal_tensor.reshape(height * width, 3, 1)
-    rotation_matrices_reshaped = rotation_matrices.reshape(height * width, 3, 3)
-    
-    # Perform batch matrix multiplication (H*W matrix multiplications at once)
-    world_normals_reshaped = torch.bmm(rotation_matrices_reshaped, normals_reshaped)
-    
-    # Reshape and normalize
-    world_normals = world_normals_reshaped.reshape(height, width, 3)
-    world_normals_norm = torch.norm(world_normals, dim=-1, keepdim=True)
-    world_normals = world_normals / (world_normals_norm + 1e-10)
-    
-    # Return as numpy array
-    return world_normals.cpu().numpy()
-
 def save_volume(volume, file_path, save_point_cloud=False):
     """
     Save a volumetric representation to a file with material properties.
@@ -384,11 +380,6 @@ def save_volume(volume, file_path, save_point_cloud=False):
         # Save OBJ with material reference
         o3d.io.write_triangle_mesh(file_path, mesh, write_vertex_normals=True, 
                                   write_vertex_colors=True, write_triangle_uvs=True)
-        
-    elif file_path.lower().endswith('.ply'):
-        # PLY format can embed some material properties
-        o3d.io.write_triangle_mesh(file_path, mesh, write_vertex_normals=True, 
-                                 write_vertex_colors=True)
     else:
         # Default to PLY if not specified
         ply_path = file_path if file_path.lower().endswith('.ply') else f"{os.path.splitext(file_path)[0]}.ply"
@@ -402,138 +393,6 @@ def save_volume(volume, file_path, save_point_cloud=False):
         print(f"Saved point cloud to {pcd_path}")
     
     print(f"Saved mesh to {file_path}")
-
-def save_to_gltf(volume, file_path, save_point_cloud=True, use_binary=True, use_draco=False):
-    """
-    Save a volumetric representation to glTF format, supporting PBR materials.
-    
-    Args:
-        volume: Dictionary containing volumetric data
-        file_path: Path where to save the glTF file (without extension)
-        save_point_cloud: Whether to save the point cloud separately
-        use_binary: Save as binary GLB instead of text glTF (more efficient)
-        use_draco: Use Draco mesh compression (requires draco installed)
-    """
-    import trimesh
-    import numpy as np
-    
-    # Make sure output directory exists
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    
-    # Get mesh and point cloud
-    o3d_mesh = volume["mesh"]
-    o3d_point_cloud = volume["point_cloud"]
-    
-    # Get material properties
-    material_props = volume.get("material_properties", {})
-    
-    # Convert Open3D mesh to trimesh
-    vertices = np.asarray(o3d_mesh.vertices)
-    faces = np.asarray(o3d_mesh.triangles)
-    
-    print(f"Converting mesh with {len(vertices)} vertices and {len(faces)} faces to glTF")
-    
-    # Create trimesh mesh
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-    
-    # Add vertex normals if available
-    if o3d_mesh.has_vertex_normals():
-        mesh.vertex_normals = np.asarray(o3d_mesh.vertex_normals)
-    
-    # Add vertex colors if available
-    if o3d_mesh.has_vertex_colors():
-        colors = np.asarray(o3d_mesh.vertex_colors)
-        # Convert from [0,1] to [0,255] for trimesh
-        colors = (colors * 255).astype(np.uint8)
-        mesh.visual.vertex_colors = colors
-    
-    # Create PBR material for the mesh
-    pbr_material = trimesh.visual.material.PBRMaterial(
-        name="material0",
-        baseColorFactor=[1.0, 1.0, 1.0, 1.0],  # Use vertex colors for base color
-        metallicFactor=material_props.get("metallic", np.array([0.0])).mean() if "metallic" in material_props else 0.0,
-        roughnessFactor=material_props.get("roughness", np.array([0.5])).mean() if "roughness" in material_props else 0.5
-    )
-    
-    # Apply material to mesh
-    mesh.visual.material = pbr_material
-    
-    # Determine file type and extension
-    file_type = 'glb' if use_binary else 'gltf'
-    export_ext = '.glb' if use_binary else '.gltf'
-    mesh_path = f"{file_path}{export_ext}"
-    
-    # Create export options
-    export_options = {}
-    if use_draco:
-        export_options['draco'] = {'quantization_bits': 14}
-    
-    # Create a scene and add mesh
-    scene = trimesh.Scene()
-    scene.add_geometry(mesh)
-    
-    # Export the scene
-    scene.export(mesh_path, file_type=file_type, **export_options)
-    print(f"Saved mesh with PBR materials to {mesh_path} ({os.path.getsize(mesh_path)/1024/1024:.2f} MB)")
-    
-    # Now create point cloud as a glTF if requested
-    if save_point_cloud and o3d_point_cloud is not None:
-        # Instead of trying to export full point cloud, which causes issues
-        # Save a downsampled version that works in web viewers
-        
-        # Get total points
-        num_points = len(np.asarray(o3d_point_cloud.points))
-        max_points = 10000000  # Max points supported by most viewers
-        
-        # If we need to downsample
-        if num_points > max_points:
-            print(f"WARNING: Point cloud has {num_points:,} points, which exceeds the " 
-                  f"recommended limit of {max_points:,} for glTF viewers.")
-            print(f"Saving full resolution as PLY, downsampled as {file_type}")
-            
-            # Calculate voxel size to achieve target point count (approximate)
-            target_ratio = max_points / num_points
-            voxel_size = 0.01 * (1 / (target_ratio ** (1/3)))
-            
-            # Save full resolution to PLY
-            pcd_full_path = f"{file_path}_points_full.ply"
-            o3d.io.write_point_cloud(pcd_full_path, o3d_point_cloud)
-            print(f"Saved full resolution point cloud to {pcd_full_path}")
-            
-            # Downsample using voxel grid
-            pcd_for_gltf = o3d_point_cloud.voxel_down_sample(voxel_size=voxel_size)
-            
-            # Get actual downsampled point count
-            down_points = len(np.asarray(pcd_for_gltf.points))
-            print(f"Downsampled to {down_points:,} points for {file_type} export")
-        else:
-            pcd_for_gltf = o3d_point_cloud
-        
-        # Convert to trimesh points
-        points = np.asarray(pcd_for_gltf.points)
-        
-        # Create point cloud as a special trimesh pointcloud
-        point_cloud = trimesh.points.PointCloud(points)
-        
-        # Add colors if available
-        if pcd_for_gltf.has_colors():
-            colors = np.asarray(pcd_for_gltf.colors)
-            # Convert from [0,1] to [0,255] for trimesh
-            colors = (colors * 255).astype(np.uint8)
-            point_cloud.colors = colors
-        
-        # Export point cloud
-        pc_path = f"{file_path}_points{export_ext}"
-        
-        # Create a scene with the point cloud
-        pc_scene = trimesh.Scene()
-        pc_scene.add_geometry(point_cloud)
-        
-        # Export the scene
-        pc_scene.export(pc_path, file_type=file_type)
-        print(f"Saved point cloud to {pc_path} ({os.path.getsize(pc_path)/1024/1024:.2f} MB)")
-    
-    return mesh_path
 
 def load_intrinsics(file_path):
     """
@@ -567,90 +426,97 @@ def save_intrinsics(intrinsics, file_path):
     with open(file_path, 'w') as f:
         json.dump(intrinsics.to_dict(), f, indent=4)
 
-def save_extended_ply(point_cloud, file_path, material_properties=None):
+def save_extended_ply_with_plyfile(point_cloud, file_path, material_properties=None):
     """
-    Save point cloud to PLY format with extended properties for PBR materials.
+    Save point cloud to binary PLY format with extended properties for PBR materials.
+    Uses the plyfile library for efficient binary storage.
     
     Args:
         point_cloud: open3d.geometry.PointCloud object
         file_path: Output file path (.ply)
         material_properties: Dictionary with additional properties like 'roughness' and 'metallic'
     """
-    import open3d as o3d
     import numpy as np
+    from plyfile import PlyData, PlyElement
+    import os
     
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     
-    # Get point cloud data
+    # Get points and count
     points = np.asarray(point_cloud.points)
     num_points = len(points)
     
-    # Check if we have material properties
-    has_roughness = material_properties is not None and 'roughness' in material_properties
-    has_metallic = material_properties is not None and 'metallic' in material_properties
+    # Check if material_properties size matches the point count
+    if material_properties is not None:
+        # Check material property sizes and resize if needed
+        for prop_name, prop_data in list(material_properties.items()):
+            if len(prop_data) != num_points:
+                print(f"Warning: {prop_name} property has {len(prop_data)} values but point cloud has {num_points} points.")
+                if len(prop_data) > num_points:
+                    # Material has more values than points (most common case)
+                    # This happens when points were filtered/removed after material assignment
+                    # We cannot recover this data accurately, so we'll discard the property
+                    print(f"Cannot reliably match {prop_name} to filtered point cloud - will not include this property")
+                    material_properties.pop(prop_name)
+                else:
+                    # Points have more elements than material (unusual case)
+                    # We cannot recover this data accurately, so we'll discard the property
+                    print(f"Cannot reliably match {prop_name} to point cloud - will not include this property")
+                    material_properties.pop(prop_name)
     
-    # Start writing PLY file
-    with open(file_path, 'w') as f:
-        # Write header
-        f.write("ply\n")
-        f.write("format ascii 1.0\n")
-        f.write(f"element vertex {num_points}\n")
+    # Start with empty list of property names and data type descriptors
+    prop_names = []
+    prop_types = []
+    prop_data = []
+    
+    # Add coordinates (always required)
+    prop_names.extend(['x', 'y', 'z'])
+    prop_types.extend([('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
+    prop_data.extend([points[:, 0], points[:, 1], points[:, 2]])
+    
+    # Add normals if available
+    if point_cloud.has_normals():
+        normals = np.asarray(point_cloud.normals)
+        prop_names.extend(['nx', 'ny', 'nz'])
+        prop_types.extend([('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4')])
+        prop_data.extend([normals[:, 0], normals[:, 1], normals[:, 2]])
+    
+    # Add colors if available
+    if point_cloud.has_colors():
+        colors = np.asarray(point_cloud.colors)
+        prop_names.extend(['red', 'green', 'blue'])
+        prop_types.extend([('red', 'f4'), ('green', 'f4'), ('blue', 'f4')])
+        prop_data.extend([colors[:, 0], colors[:, 1], colors[:, 2]])
+    
+    # Add material properties only if they match point count
+    if material_properties:
+        if 'roughness' in material_properties and len(material_properties['roughness']) == num_points:
+            roughness = material_properties['roughness']
+            prop_names.append('roughness')
+            prop_types.append(('roughness', 'f4'))
+            prop_data.append(roughness)
+        else:
+            print("Skipping roughness property - size mismatch")
         
-        # Position properties
-        f.write("property float x\n")
-        f.write("property float y\n")
-        f.write("property float z\n")
-        
-        # Normal properties if available
-        if point_cloud.has_normals():
-            f.write("property float nx\n")
-            f.write("property float ny\n")
-            f.write("property float nz\n")
-        
-        # Color properties if available
-        if point_cloud.has_colors():
-            f.write("property float red\n")
-            f.write("property float green\n")
-            f.write("property float blue\n")
-        
-        # Material properties
-        if has_roughness:
-            f.write("property float roughness\n")
-        if has_metallic:
-            f.write("property float metallic\n")
-        
-        f.write("end_header\n")
-        
-        # Write vertex data
-        normals = np.asarray(point_cloud.normals) if point_cloud.has_normals() else None
-        colors = np.asarray(point_cloud.colors) if point_cloud.has_colors() else None
-        
-        # Get material data
-        roughness_values = material_properties['roughness'] if has_roughness else None
-        metallic_values = material_properties['metallic'] if has_metallic else None
-        
-        for i in range(num_points):
-            # Write position
-            f.write(f"{points[i,0]} {points[i,1]} {points[i,2]}")
-            
-            # Write normals
-            if normals is not None:
-                f.write(f" {normals[i,0]} {normals[i,1]} {normals[i,2]}")
-            
-            # Write colors
-            if colors is not None:
-                f.write(f" {colors[i,0]} {colors[i,1]} {colors[i,2]}")
-            
-            # Write roughness
-            if has_roughness:
-                f.write(f" {roughness_values[i]}")
-            
-            # Write metallic
-            if has_metallic:
-                f.write(f" {metallic_values[i]}")
-            
-            f.write("\n")
+        if 'metallic' in material_properties and len(material_properties['metallic']) == num_points:
+            metallic = material_properties['metallic']
+            prop_names.append('metallic')
+            prop_types.append(('metallic', 'f4'))
+            prop_data.append(metallic)
+        else:
+            print("Skipping metallic property - size mismatch")
+    
+    # Create structured array for vertex data
+    vertex_data = np.zeros(num_points, dtype=prop_types)
+    
+    # Fill the structured array
+    for name, data in zip(prop_names, prop_data):
+        vertex_data[name] = data
+    
+    # Create PlyElement and save
+    vertex_element = PlyElement.describe(vertex_data, 'vertex')
+    PlyData([vertex_element], text=False).write(file_path)
     
     print(f"Saved extended PLY with material properties to {file_path}")
     return file_path
