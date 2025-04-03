@@ -105,7 +105,7 @@ def visualize_point_cloud(point_cloud, title="Point Cloud", save_path=None, show
         
     # Create a visualizer
     vis = o3d.visualization.Visualizer()
-    vis.create_window(title, width=1024, height=768)
+    vis.create_window(title, width=1920, height=1080)
     
     # Add point cloud to the visualizer
     vis.add_geometry(point_cloud)
@@ -156,7 +156,7 @@ def visualize_mesh(mesh, title="Mesh Visualization", save_path=None, show=True):
         
     # Create a visualizer
     vis = o3d.visualization.Visualizer()
-    vis.create_window(title, width=1024, height=768)
+    vis.create_window(title, width=1920, height=1080)
     
     # Add mesh to the visualizer
     vis.add_geometry(mesh)
@@ -271,7 +271,7 @@ def visualize_camera_and_points(point_cloud, save_path=None, show=True):
     """
     # Create a visualizer
     vis = o3d.visualization.Visualizer()
-    vis.create_window("Camera and Points", width=1024, height=768)
+    vis.create_window("Camera and Points", width=1920, height=1080)
     
     # Add point cloud to the visualizer
     vis.add_geometry(point_cloud)
@@ -594,7 +594,7 @@ def visualize_point_cloud_with_normals(point_cloud, scale=0.05, sample_ratio=0.0
     
     # Create a visualization window
     vis = o3d.visualization.Visualizer()
-    vis.create_window(title, width=1024, height=768)
+    vis.create_window(title, width=1920, height=1080)
     
     # Add the point cloud
     vis.add_geometry(point_cloud)
@@ -712,3 +712,105 @@ def visualize_pbr_materials(color_map, roughness_map, metallic_map, save_path=No
         plt.show()
     else:
         plt.close()
+
+def visualize_point_cloud_with_pbr(point_cloud, material_properties=None, title="Point Cloud with PBR", 
+                                 save_path=None, show=True):
+    """
+    Visualize a point cloud with simulated PBR material properties.
+    
+    Args:
+        point_cloud: open3d.geometry.PointCloud object
+        material_properties: Dictionary with 'roughness' and 'metallic' values
+        title: Title for the visualization window
+        save_path: Optional path to save the visualization
+        show: Whether to display the visualization
+    """
+    import open3d as o3d
+    import numpy as np
+    import os
+    import copy
+    
+    # Create a copy to avoid modifying the original
+    pcd = copy.deepcopy(point_cloud)
+    
+    # Simulate PBR materials by modifying colors based on roughness and metallic values
+    if material_properties is not None and len(pcd.points) > 0:
+        # Get original colors or create new ones
+        has_original_colors = pcd.has_colors()
+        colors = np.asarray(pcd.colors).copy() if has_original_colors else np.ones((len(pcd.points), 3)) * 0.7
+        
+        # Process metallic property
+        if 'metallic' in material_properties and len(material_properties['metallic']) == len(pcd.points):
+            metallic_values = material_properties['metallic']
+            
+            # Create a metallic effect (silver/blue tint for high metallic values)
+            metallic_color = np.ones((len(colors), 3)) * np.array([0.8, 0.8, 0.9])  # Slight blue tint
+            
+            # Blend between original color and metallic color based on metallic value
+            metallic_factors = np.expand_dims(metallic_values, axis=1)
+            colors = colors * (1 - metallic_factors * 0.8) + metallic_color * (metallic_factors * 0.8)
+            
+            print(f"Applied metallic effect (average metallic: {np.mean(metallic_values):.3f})")
+        
+        # Process roughness property
+        if 'roughness' in material_properties and len(material_properties['roughness']) == len(pcd.points):
+            roughness_values = material_properties['roughness']
+            
+            # Simulate roughness - rough surfaces are slightly darker (less specular)
+            brightness_adjustment = 1.0 - (roughness_values * 0.3)
+            colors *= np.expand_dims(brightness_adjustment, axis=1)
+            
+            print(f"Applied roughness effect (average roughness: {np.mean(roughness_values):.3f})")
+        
+        # Ensure colors are in valid range
+        colors = np.clip(colors, 0, 1)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+    
+    # Create a new visualizer
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(title, 1024, 768)
+    
+    # Add the point cloud
+    vis.add_geometry(pcd)
+    
+    # Set rendering options
+    render_option = vis.get_render_option()
+    render_option.background_color = np.array([0.1, 0.1, 0.1])
+    render_option.point_size = 3.0
+    
+    # Enable lighting for better appearance
+    render_option.light_on = True
+    
+    # Set up a good camera viewpoint
+    view_control = vis.get_view_control()
+    
+    # Calculate a good camera position based on point cloud bounds
+    bounds = pcd.get_axis_aligned_bounding_box()
+    
+    # Reset view and update
+    vis.reset_view_point(True)
+    vis.update_geometry(pcd)
+    vis.poll_events()
+    vis.update_renderer()
+    
+    # Capture image if requested
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # Render a few frames to make sure everything is set up correctly
+        for _ in range(5):
+            vis.poll_events()
+            vis.update_renderer()
+        
+        # Save the image
+        vis.capture_screen_image(save_path)
+        print(f"Saved PBR visualization to {save_path}")
+    
+    # Run visualization if requested
+    if show:
+        vis.run()
+    
+    # Close the window
+    vis.destroy_window()
+    
+    return True

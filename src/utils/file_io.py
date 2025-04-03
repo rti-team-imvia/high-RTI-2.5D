@@ -447,23 +447,15 @@ def save_extended_ply_with_plyfile(point_cloud, file_path, material_properties=N
     points = np.asarray(point_cloud.points)
     num_points = len(points)
     
-    # Check if material_properties size matches the point count
-    if material_properties is not None:
-        # Check material property sizes and resize if needed
-        for prop_name, prop_data in list(material_properties.items()):
-            if len(prop_data) != num_points:
-                print(f"Warning: {prop_name} property has {len(prop_data)} values but point cloud has {num_points} points.")
-                if len(prop_data) > num_points:
-                    # Material has more values than points (most common case)
-                    # This happens when points were filtered/removed after material assignment
-                    # We cannot recover this data accurately, so we'll discard the property
-                    print(f"Cannot reliably match {prop_name} to filtered point cloud - will not include this property")
-                    material_properties.pop(prop_name)
-                else:
-                    # Points have more elements than material (unusual case)
-                    # We cannot recover this data accurately, so we'll discard the property
-                    print(f"Cannot reliably match {prop_name} to point cloud - will not include this property")
-                    material_properties.pop(prop_name)
+    # Debug output to see what's happening with material properties
+    if material_properties:
+        print(f"Material properties for PLY export:")
+        for prop_name in material_properties:
+            print(f"  - {prop_name}: {len(material_properties[prop_name])} values")
+    else:
+        print("No material properties available for PLY export")
+
+    print(f"Point cloud has {num_points} points")
     
     # Start with empty list of property names and data type descriptors
     prop_names = []
@@ -506,6 +498,9 @@ def save_extended_ply_with_plyfile(point_cloud, file_path, material_properties=N
             prop_data.append(metallic)
         else:
             print("Skipping metallic property - size mismatch")
+    
+    # Now print the properties that will be included in the PLY file
+    print(f"PLY file will have properties: {prop_names}")
     
     # Create structured array for vertex data
     vertex_data = np.zeros(num_points, dtype=prop_types)

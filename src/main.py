@@ -191,9 +191,18 @@ def main():
         for prop_name in list(volume['material_properties'].keys()):
             if len(volume['material_properties'][prop_name]) != num_points:
                 print(f"Warning: Material property {prop_name} size doesn't match point count.")
-                print(f"Regenerating {prop_name} property for filtered point cloud...")
-                # Remove the mismatched property
-                volume['material_properties'].pop(prop_name)
+                print(f"Property has {len(volume['material_properties'][prop_name])} values but point cloud has {num_points} points.")
+                # Instead of removing the property, let's log this error so we can understand what's happening
+                if len(volume['material_properties'][prop_name]) > num_points:
+                    print("Filtering material property to match point cloud size...")
+                    # If we have indices of which points remain after filtering, we could use those
+                    # For now, we'll just drop the property as we don't have a reliable way to match points
+                    volume['material_properties'].pop(prop_name)
+                    print(f"Removed {prop_name} property - consider modifying volume_generator.py to maintain property mapping")
+                else:
+                    # This is unusual - we have more points than material properties
+                    print(f"Cannot reliably match {prop_name} to point cloud - removing property")
+                    volume['material_properties'].pop(prop_name)
      
     # Save the volumetric mesh in different formats
     print("Visualizing volumetric representation to {}".format(vis_output_dir))
@@ -239,6 +248,17 @@ def main():
         sample_ratio=0.001,  
         save_path=normal_vis_path, 
         show=True
+    )
+    
+    # Add PBR visualization of the point cloud
+    pbr_vis_path = os.path.join(vis_output_dir, 'point_cloud_pbr_visualization.png')
+    print(f"Creating PBR visualization of point cloud to {pbr_vis_path}")
+    visualize_point_cloud_with_pbr(
+        volume["point_cloud"],
+        material_properties=volume.get("material_properties", {}),
+        title="Point Cloud with PBR Materials",
+        save_path=pbr_vis_path,
+        show=True  # Set to True to see the interactive visualization
     )
     
     print("Processing completed successfully!")

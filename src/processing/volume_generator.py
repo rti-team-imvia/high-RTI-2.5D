@@ -186,10 +186,24 @@ class VolumeGenerator:
         
         # Statistical outlier removal (keep this separate for clarity)
         print("Removing outliers from point cloud...")
-        pcd, _ = pcd.remove_statistical_outlier(
+        pcd, inlier_indices = pcd.remove_statistical_outlier(
             nb_neighbors=20,
             std_ratio=2.0
         )
+
+        # Update material properties to match the filtered point cloud
+        if material_info:
+            print("Updating material properties after outlier removal...")
+            for prop_name in list(material_info.keys()):
+                if len(material_info[prop_name]) > len(pcd.points):
+                    # Use inlier indices to keep the matching properties
+                    try:
+                        material_info[prop_name] = material_info[prop_name][inlier_indices]
+                        print(f"Updated {prop_name} property: {len(material_info[prop_name])} values remain")
+                    except Exception as e:
+                        print(f"Failed to update {prop_name} property: {str(e)}")
+                        # If we can't update, we'll remove it
+                        material_info.pop(prop_name)
         
         # Ensure normals are properly oriented
         if pcd.has_normals():
