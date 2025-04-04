@@ -13,89 +13,6 @@ class DepthProcessor:
         self.selective_gpu, _, _, _ = check_gpu_availability()
         if self.selective_gpu:
             print("Will use GPU only for parallel operations (convolutions, large matrix ops)")
-    
-    def process(self, depth_map, mask=None, invert_depth=True, normalize=True, 
-                remove_outliers=True, percentile_clip=(2, 98)):
-        """
-        Process the depth map to prepare it for volumetric reconstruction.
-        
-        Args:
-            depth_map: 2D numpy array with depth values
-            mask: Optional binary mask to filter valid regions
-            invert_depth: Whether to invert depth values (if TRUE means larger values are closer to camera)
-            normalize: Whether to normalize depth values to [0, 1] range
-            remove_outliers: Whether to remove statistical outliers
-            percentile_clip: Percentiles to use for clipping outliers (min, max)
-            
-        Returns:
-            numpy.ndarray: Processed depth map
-        """
-        self.depth_map = depth_map.copy()
-        
-        # Improve mask if provided
-        if mask is not None:
-            # Clean up the mask with morphological operations
-            cleaned_mask = self._clean_mask(mask)
-            valid_mask = cleaned_mask > 0
-        else:
-            valid_mask = np.ones_like(self.depth_map, dtype=bool)
-        
-        # Further filter by valid depth values
-        valid_mask = valid_mask & (self.depth_map > 0)
-        
-        # Check if we have valid pixels
-        if not np.any(valid_mask):
-            print("WARNING: No valid depth values found after masking!")
-            return self.depth_map
-        
-        # Remove statistical outliers if requested
-        if remove_outliers:
-            self._remove_statistical_outliers(valid_mask, percentile_clip)
-            # Update valid mask
-            valid_mask = valid_mask & (self.depth_map > 0)
-            
-        # Check if we need to invert the depth values
-        if invert_depth:
-            # Only invert the valid pixels
-            valid_depth = self.depth_map[valid_mask]
-            max_depth = np.max(valid_depth)
-            self.depth_map[valid_mask] = max_depth - valid_depth + 0.001  # Add small offset to avoid zeros
-            print(f"Inverted depth values: new range [{np.min(self.depth_map[valid_mask])}, {np.max(self.depth_map[valid_mask])}]")
-            
-        # Normalize depth values if requested
-        if normalize:
-            self._robust_normalize(valid_mask, percentile_clip)
-            
-        # Remove noise with bilateral filter (preserves edges)
-        # Only filter the valid regions
-        if self.selective_gpu:
-            print("Using GPU for bilateral filtering...")
-            filtered_depth = gpu_enabled_bilateral_filter(
-                self.depth_map, 
-                d=7,  # Diameter of each pixel neighborhood
-                sigma_color=0.05,  # Filter sigma in the color space
-                sigma_space=2.0  # Filter sigma in the coordinate space
-            )
-        else:
-            filtered_depth = cv2.bilateralFilter(
-                self.depth_map.astype(np.float32), 
-                d=7,  # Diameter of each pixel neighborhood
-                sigmaColor=0.05,  # Filter sigma in the color space
-                sigmaSpace=2.0  # Filter sigma in the coordinate space
-            )
-        self.depth_map = filtered_depth
-        
-        # Fill small holes using morphological operations
-        self._fill_small_holes()
-        
-        # Ensure no negative depth values
-        self.depth_map = np.maximum(self.depth_map, 0)
-        
-        # Apply mask again to ensure only valid regions are kept
-        if mask is not None:
-            self.depth_map = self.depth_map * (valid_mask)
-        
-        return self.depth_map
         
     def _clean_mask(self, mask):
         """
@@ -240,7 +157,7 @@ class DepthProcessor:
         self.depth_map = np.maximum(self.depth_map, 0)
         
         # Fill small holes (optional)
-        self._fill_small_holes(max_hole_size=15)
+        #self._fill_small_holes(max_hole_size=15)
         
         # Apply bilateral filtering to reduce noise while preserving edges
         print("Using bilateral filtering for noise reduction...")
