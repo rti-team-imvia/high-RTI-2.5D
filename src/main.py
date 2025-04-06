@@ -155,9 +155,23 @@ def main():
     # Process the depth map using the normal map for correction
     print("Processing depth map...")
     depth_processor = DepthProcessor()
+
+    # Debug check: Verify normal map is valid
+    if normal_map is not None:
+        print(f"Debug: Normal map shape: {normal_map.shape}, type: {type(normal_map)}")
+        print(f"Debug: Normal map min/max/mean Z: {np.min(normal_map[:,:,2]):.3f}/{np.max(normal_map[:,:,2]):.3f}/{np.mean(normal_map[:,:,2]):.3f}")
+    else:
+        print("Debug: Normal map is None!")
+
+    # Fix: Use absolute path for visualization output
+    discontinuity_vis_path = os.path.join(output_dir, 'discontinuity_removal.png')
+
     processed_depth = depth_processor.process_metric_depth(
         depth_map, 
-        mask
+        mask=mask,
+        normal_map=normal_map,
+        visualize_discontinuities=True,
+        discontinuity_vis_path=discontinuity_vis_path  # Pass absolute path
     )
     
     # Visualize the processed depth map with normal enhancement

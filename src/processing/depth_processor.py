@@ -3,6 +3,7 @@ import cv2
 import matplotlib.pyplot as plt
 from skimage import filters, morphology
 from utils.gpu_utils import check_gpu_availability, gpu_enabled_bilateral_filter
+import os
 
 class DepthProcessor:
     """
@@ -10,6 +11,7 @@ class DepthProcessor:
     """
     def __init__(self):
         self.depth_map = None
+        self.normal_map = None
         self.selective_gpu, _, _, _ = check_gpu_availability()
         if self.selective_gpu:
             print("Will use GPU only for parallel operations (convolutions, large matrix ops)")
@@ -133,31 +135,165 @@ class DepthProcessor:
                     # Fill the hole with the mean depth
                     self.depth_map[hole_pixels] = mean_boundary_depth
     
-    def process_metric_depth(self, depth_map, mask=None):
+    def _remove_depth_discontinuities(self, depth_threshold_factor=2.0, acceleration_factor=1.5):
         """
-        Process a metric depth map with minimal modifications.
-        For metric depth maps, we want to preserve the actual depth values.
+        Remove problematic pixels with large depth discontinuities, using both 
+        gradient (first derivative) and acceleration (second derivative) analysis.
         
         Args:
-            depth_map: 2D numpy array with metric depth values
-            mask: Optional binary mask to filter valid regions
-            normal_map: Optional normal map to correct depth inaccuracies
-            camera_intrinsics: Optional camera intrinsics for correct projection
-            
-        Returns:
-            numpy.ndarray: Processed depth map
-        """
-        self.depth_map = depth_map.copy()
+            depth_threshold_factor: Multiplier for gradient threshold
+            acceleration_factor: Multiplier for acceleration threshold
         
-        # Apply mask if provided to isolate valid regions
+        Returns:
+            Tuple: (cleaned_depth_map, visualization_data)
+        """
+        print("Performing enhanced depth discontinuity detection with acceleration analysis...")
+        
+        # Create valid pixel mask
+        valid_mask = self.depth_map > 0
+        
+        # --- DEPTH GRADIENT (FIRST DERIVATIVE) ANALYSIS ---
+        
+        # Calculate depth gradient using Sobel operators
+        grad_x = cv2.Sobel(self.depth_map, cv2.CV_32F, 1, 0, ksize=5)
+        grad_y = cv2.Sobel(self.depth_map, cv2.CV_32F, 0, 1, ksize=5)
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        
+        # Calculate gradient statistics
+        valid_gradients = gradient_magnitude[valid_mask]
+        mean_gradient = np.mean(valid_gradients)
+        std_gradient = np.std(valid_gradients)
+        
+        # Define threshold for discontinuities
+        gradient_threshold = mean_gradient + depth_threshold_factor * std_gradient
+        
+        # --- DEPTH ACCELERATION (SECOND DERIVATIVE) ANALYSIS ---
+        
+        # Calculate Laplacian (sum of second derivatives in x and y)
+        laplacian = cv2.Laplacian(self.depth_map, cv2.CV_32F, ksize=5)
+        acceleration_magnitude = np.abs(laplacian)
+        
+        # Calculate acceleration statistics
+        valid_acceleration = acceleration_magnitude[valid_mask]
+        mean_acceleration = np.mean(valid_acceleration)
+        std_acceleration = np.std(valid_acceleration)
+        
+        # Define threshold for acceleration discontinuities
+        acceleration_threshold = mean_acceleration + acceleration_factor * std_acceleration
+        
+        # --- COMBINED ANALYSIS ---
+        
+        # Identify areas with high gradient
+        gradient_problem_areas = gradient_magnitude > gradient_threshold
+        gradient_problem_areas = gradient_problem_areas & valid_mask
+        
+        # Identify areas with high acceleration
+        acceleration_problem_areas = acceleration_magnitude > acceleration_threshold
+        acceleration_problem_areas = acceleration_problem_areas & valid_mask
+        
+        # Combine problem areas (either high gradient OR high acceleration)
+        problem_areas = gradient_problem_areas | acceleration_problem_areas
+        
+        # Dilate to capture neighboring uncertain points (which cause stretching)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        problem_areas_dilated = cv2.dilate(problem_areas.astype(np.uint8), kernel).astype(bool)
+        
+        # Get count of removed pixels
+        removed_count = np.sum(problem_areas_dilated & valid_mask)
+        if removed_count > 0:
+            percent_removed = removed_count / np.sum(valid_mask) * 100
+            print(f"Removing {removed_count} problematic pixels ({percent_removed:.2f}% of valid pixels)")
+            print(f"  - High gradient areas: {np.sum(gradient_problem_areas & valid_mask)} pixels")
+            print(f"  - High acceleration areas: {np.sum(acceleration_problem_areas & valid_mask)} pixels")
+            print(f"  - Additional from dilation: {removed_count - np.sum(problem_areas & valid_mask)} pixels")
+        
+        # Apply the filter
+        cleaned_depth = self.depth_map.copy()
+        cleaned_depth[problem_areas_dilated] = 0
+        
+        # Create visualization data
+        vis_data = {
+            'original_depth': self.depth_map.copy(),
+            'cleaned_depth': cleaned_depth,
+            'gradient_magnitude': gradient_magnitude,
+            'acceleration_magnitude': acceleration_magnitude,
+            'gradient_problem_areas': gradient_problem_areas,
+            'acceleration_problem_areas': acceleration_problem_areas,
+            'problem_areas': problem_areas,
+            'problem_areas_dilated': problem_areas_dilated
+        }
+        
+        # Update the depth map
+        self.depth_map = cleaned_depth
+        
+        return cleaned_depth, vis_data
+    
+    def _visualize_discontinuity_removal(self, vis_data, save_path=None):
+        """Create detailed visualization of removed depth discontinuities with acceleration analysis."""
+        fig, axes = plt.subplots(3, 2, figsize=(14, 15))
+        
+        # Original and cleaned depth
+        axes[0, 0].imshow(vis_data['original_depth'], cmap='viridis')
+        axes[0, 0].set_title('Original Depth Map')
+        
+        axes[0, 1].imshow(vis_data['cleaned_depth'], cmap='viridis')
+        axes[0, 1].set_title('Cleaned Depth Map')
+        
+        # Gradient and acceleration
+        axes[1, 0].imshow(vis_data['gradient_magnitude'], cmap='plasma')
+        axes[1, 0].set_title('Depth Gradient (First Derivative)')
+        
+        axes[1, 1].imshow(vis_data['acceleration_magnitude'], cmap='plasma')
+        axes[1, 1].set_title('Depth Acceleration (Second Derivative)')
+        
+        # Problem areas
+        combined_problems = np.zeros_like(vis_data['original_depth'])
+        combined_problems[vis_data['gradient_problem_areas']] = 1  # Red for gradient issues
+        combined_problems[vis_data['acceleration_problem_areas']] = 2  # Yellow for acceleration issues
+        
+        axes[2, 0].imshow(combined_problems, cmap='viridis')
+        axes[2, 0].set_title('Identified Issues\n(1=Gradient, 2=Acceleration)')
+        
+        # Final removed areas
+        removed = vis_data['original_depth'].copy()
+        removed[~vis_data['problem_areas_dilated']] = 0
+        axes[2, 1].imshow(removed, cmap='hot')
+        axes[2, 1].set_title('Removed Areas')
+        
+        plt.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Saved discontinuity visualization to {save_path}")
+        plt.close()
+    
+    def process_metric_depth(self, depth_map, mask=None, normal_map=None, 
+                             visualize_discontinuities=True, discontinuity_vis_path=None):
+        """Process a metric depth map with discontinuity removal."""
+        self.depth_map = depth_map.copy()
+        self.normal_map = normal_map
+        
+        # Apply mask if provided
         if mask is not None:
             self.depth_map = self.depth_map * (mask > 0)
         
-        # Ensure no negative or invalid depth values
+        # Ensure no negative values
         self.depth_map = np.maximum(self.depth_map, 0)
         
-        # Fill small holes (optional)
-        #self._fill_small_holes(max_hole_size=15)
+        # Remove depth discontinuities
+        if normal_map is not None:
+            print("Using enhanced depth discontinuity detection...")
+            
+            _, vis_data = self._remove_depth_discontinuities(
+                depth_threshold_factor=0.25,
+                acceleration_factor=1
+            )
+            
+            # Visualize what was removed
+            if visualize_discontinuities and vis_data is not None:
+                vis_path = discontinuity_vis_path or os.path.join('data', 'output', 'discontinuity_removal.png')
+                self._visualize_discontinuity_removal(vis_data, save_path=vis_path)
+                print(f"Created discontinuity removal visualization at: {vis_path}")
         
         # Apply bilateral filtering to reduce noise while preserving edges
         print("Using bilateral filtering for noise reduction...")
@@ -165,9 +301,9 @@ class DepthProcessor:
             print("Using GPU for bilateral filtering...")
             filtered_depth = gpu_enabled_bilateral_filter(
                 self.depth_map, 
-                d=7,  # Diameter of each pixel neighborhood
+                d=25,  # Diameter of each pixel neighborhood
                 sigma_color=0.05,  # Filter sigma in the color space
-                sigma_space=2.0  # Filter sigma in the coordinate space
+                sigma_space=15  # Filter sigma in the coordinate space
             )
         else:
             filtered_depth = cv2.bilateralFilter(
@@ -187,212 +323,3 @@ class DepthProcessor:
         
         # Return the filtered depth map
         return filtered_depth
-
-    def correct_depth_with_normals(self, depth_map, normal_map, mask=None, 
-                                   camera_intrinsics=None, smoothness_weight=0.8, iterations=3):
-        """
-        Correct depth map inaccuracies using normal map information.
-        Particularly improves flat areas by using normal consistency.
-        
-        Args:
-            depth_map: 2D numpy array with metric depth values
-            normal_map: 3D numpy array with normal vectors [H, W, 3]
-            mask: Optional binary mask for valid regions
-            camera_intrinsics: Camera intrinsics object with fx, fy, cx, cy
-            smoothness_weight: Weight of normal-based correction (0-1)
-            iterations: Number of refinement iterations
-            
-        Returns:
-            numpy.ndarray: Corrected depth map
-        """
-        if normal_map is None:
-            print("No normal map provided for depth correction.")
-            return depth_map
-            
-        print("Correcting depth map using normal information...")
-        
-        # Create a copy to work with
-        corrected_depth = depth_map.copy()
-        
-        # Get dimensions
-        height, width = depth_map.shape
-        
-        # Create valid pixel mask
-        if mask is not None:
-            valid_mask = mask > 0
-        else:
-            valid_mask = np.ones_like(depth_map, dtype=bool)
-        
-        # Further filter by valid depth
-        valid_mask = valid_mask & (depth_map > 0)
-        
-        # Get camera intrinsics for depth-to-point conversion
-        if camera_intrinsics is not None:
-            fx = camera_intrinsics.fx
-            fy = camera_intrinsics.fy
-            cx = camera_intrinsics.cx
-            cy = camera_intrinsics.cy
-            print(f"Using provided camera intrinsics: fx={fx}, fy={fy}, cx={cx}, cy={cy}")
-        else:
-            # Use reasonable defaults if not provided
-            fx = 525.0
-            fy = 525.0
-            cx = width / 2
-            cy = height / 2
-            print(f"Using default camera intrinsics: fx={fx}, fy={fy}, cx={cx}, cy={cy}")
-        
-        # Create pixel coordinate grids
-        v, u = np.indices((height, width)).astype(np.float32)
-        
-        # Identify regions with consistent normals (likely flat surfaces)
-        print("Identifying flat regions using normal consistency...")
-        
-        # Calculate normal consistency in local neighborhoods
-        kernel_size = 5
-        normal_consistency = np.zeros_like(depth_map)
-        
-        # For each valid pixel
-        for y in range(kernel_size, height - kernel_size, kernel_size // 2):
-            for x in range(kernel_size, width - kernel_size, kernel_size // 2):
-                if not valid_mask[y, x]:
-                    continue
-                    
-                # Get neighborhood
-                y_min, y_max = max(0, y - kernel_size), min(height, y + kernel_size + 1)
-                x_min, x_max = max(0, x - kernel_size), min(width, x + kernel_size + 1)
-                
-                # Get center normal
-                center_normal = normal_map[y, x]
-                
-                # Get neighborhood normals
-                neighborhood = normal_map[y_min:y_max, x_min:x_max]
-                
-                # Calculate dot products with center normal
-                # Reshape center normal to [1, 1, 3] for broadcasting
-                center_normal = center_normal.reshape(1, 1, 3)
-                dot_products = np.sum(neighborhood * center_normal, axis=2)
-                
-                # Calculate consistency (higher is more consistent)
-                consistency = np.mean(np.abs(dot_products))
-                
-                # Mark this region's consistency
-                normal_consistency[y_min:y_max, x_min:x_max] = np.maximum(
-                    normal_consistency[y_min:y_max, x_min:x_max],
-                    consistency
-                )
-        
-        # Normalize consistency scores
-        if np.max(normal_consistency) > 0:
-            normal_consistency = normal_consistency / np.max(normal_consistency)
-        
-        # Visualize normal consistency (for debugging)
-        plt.figure(figsize=(10, 8))
-        plt.imshow(normal_consistency, cmap='viridis')
-        plt.colorbar(label='Normal Consistency')
-        plt.title('Normal Consistency Map (Higher = More Flat)')
-        plt.savefig('normal_consistency.png', bbox_inches='tight')
-        plt.close()
-        
-        # Iterative correction
-        for iteration in range(iterations):
-            print(f"Depth correction iteration {iteration+1}/{iterations}")
-            
-            # Convert depth to 3D points
-            z = corrected_depth
-            x = (u - cx) * z / fx
-            y = (v - cy) * z / fy
-            
-            # For each pixel
-            for y_idx in range(kernel_size, height - kernel_size):
-                for x_idx in range(kernel_size, width - kernel_size):
-                    if not valid_mask[y_idx, x_idx]:
-                        continue
-                        
-                    # Skip pixels in non-flat regions (low consistency)
-                    if normal_consistency[y_idx, x_idx] < 0.7:  # Threshold for flatness
-                        continue
-                    
-                    # Get neighborhood
-                    y_min, y_max = max(0, y_idx - kernel_size), min(height, y_idx + kernel_size + 1)
-                    x_min, x_max = max(0, x_idx - kernel_size), min(width, x_idx + kernel_size + 1)
-                    
-                    # Create local mask for valid pixels
-                    local_mask = valid_mask[y_min:y_max, x_min:x_max]
-                    if not np.any(local_mask):
-                        continue
-                    
-                    # Get the surface normal at this pixel
-                    normal = normal_map[y_idx, x_idx]
-                    
-                    # Get 3D points in neighborhood
-                    local_z = z[y_min:y_max, x_min:x_max][local_mask]
-                    local_x = x[y_min:y_max, x_min:x_max][local_mask]
-                    local_y = y[y_min:y_max, x_min:x_max][local_mask]
-                    
-                    # Stack into points
-                    local_points = np.stack((local_x, local_y, local_z), axis=1)
-                    
-                    if len(local_points) < 3:  # Need at least 3 points for a plane
-                        continue
-                    
-                    # Compute centroid of local points
-                    centroid = np.mean(local_points, axis=0)
-                    
-                    # Current point
-                    current_point = np.array([x[y_idx, x_idx], y[y_idx, x_idx], z[y_idx, x_idx]])
-                    
-                    # Project current point onto the plane defined by centroid and normal
-                    # The plane equation is: normal·(p - centroid) = 0
-                    # where p is any point on the plane
-                    
-                    # Vector from centroid to current point
-                    v_to_point = current_point - centroid
-                    
-                    # Distance from point to plane
-                    dist_to_plane = np.dot(v_to_point, normal)
-                    
-                    # Projected point
-                    projected_point = current_point - dist_to_plane * normal
-                    
-                    # Update depth using a weighted combination of original and corrected depth
-                    # Weight by normal consistency - more consistent = more correction
-                    weight = smoothness_weight * normal_consistency[y_idx, x_idx]
-                    corrected_depth[y_idx, x_idx] = (1 - weight) * corrected_depth[y_idx, x_idx] + \
-                                                   weight * projected_point[2]
-        
-        # Apply median filter to smooth results
-        corrected_depth = cv2.medianBlur(
-            corrected_depth.astype(np.float32), 
-            ksize=3
-        )
-        
-        # Visualize the correction (for debugging)
-        plt.figure(figsize=(15, 5))
-        
-        plt.subplot(1, 3, 1)
-        plt.imshow(depth_map, cmap='viridis')
-        plt.title('Original Depth')
-        plt.colorbar()
-        
-        plt.subplot(1, 3, 2)
-        plt.imshow(corrected_depth, cmap='viridis')
-        plt.title('Corrected Depth')
-        plt.colorbar()
-        
-        plt.subplot(1, 3, 3)
-        diff = corrected_depth - depth_map
-        plt.imshow(diff, cmap='RdBu')
-        plt.title('Difference (Red = Added, Blue = Removed)')
-        plt.colorbar()
-        
-        plt.tight_layout()
-        plt.savefig('depth_correction.png', bbox_inches='tight')
-        plt.close()
-        
-        # Report statistics on changes
-        valid_diff = diff[valid_mask]
-        if len(valid_diff) > 0:
-            print(f"Depth correction stats: min={valid_diff.min():.6f}m, max={valid_diff.max():.6f}m, mean={valid_diff.mean():.6f}m")
-            print(f"Absolute changes: mean={np.abs(valid_diff).mean():.6f}m, median={np.median(np.abs(valid_diff)):.6f}m")
-        
-        return corrected_depth

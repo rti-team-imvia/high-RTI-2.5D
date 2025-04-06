@@ -5,6 +5,8 @@ import time
 import cv2
 import open3d as o3d
 import glob
+import argparse
+from pathlib import Path
 from datetime import datetime
 
 # Add project root to path
@@ -17,24 +19,25 @@ from utils.visualization import *
 from utils.gpu_utils import *
 from camera.intrinsics import CameraIntrinsics
 
-def process_dataset(input_dir, dataset_name, point_cloud_dir):
+def process_dataset(input_dir, output_base_dir, rel_path=""):
     """
     Process a single dataset and save the point cloud with PBR properties
     
     Args:
         input_dir: Directory containing the dataset files
-        dataset_name: Name of the dataset (for output filename)
-        point_cloud_dir: Directory to save the point cloud PLY file
+        output_base_dir: Base directory to save the point cloud PLY files
+        rel_path: Relative path from the base input directory
     
     Returns:
         bool: True if processing succeeded, False otherwise
     """
+    dataset_name = os.path.basename(input_dir)
     print(f"\n{'='*80}")
-    print(f"Processing dataset: {dataset_name}")
+    print(f"Processing dataset: {os.path.join(rel_path, dataset_name)}")
     print(f"{'='*80}\n")
     
     # Define input files
-    depth_map_path = os.path.join(input_dir, 'depth.tiff')
+    depth_map_path = os.path.join(input_dir, 'depth_map.tiff')
     mask_path = os.path.join(input_dir, 'mask.png')
     normal_map_path = os.path.join(input_dir, 'normal.png')
     color_map_path = os.path.join(input_dir, 'baseColor.png')
@@ -42,6 +45,11 @@ def process_dataset(input_dir, dataset_name, point_cloud_dir):
     # Skip if depth map doesn't exist
     if not os.path.exists(depth_map_path):
         print(f"Error: Depth map not found at {depth_map_path}")
+        return False
+    
+    # Skip if normal map doesn't exist
+    if not os.path.exists(normal_map_path):
+        print(f"Error: Normal map not found at {normal_map_path}")
         return False
     
     # Load camera intrinsics (default values used if file not found)
@@ -56,22 +64,32 @@ def process_dataset(input_dir, dataset_name, point_cloud_dir):
     depth_map = load_depth_map(depth_map_path)
     print(f"Depth map shape: {depth_map.shape}, dtype: {depth_map.dtype}, min: {depth_map.min()}, max: {depth_map.max()}")
     
-    # Load mask if available
+    # Load normal map
+    print(f"Loading normal map from {normal_map_path}")
+    normal_map = load_normal_map(normal_map_path)
+    if normal_map is None:
+        print(f"Error: Failed to load normal map from {normal_map_path}")
+        return False
+    
+    print(f"Normal map shape: {normal_map.shape}")
+
+    # Load mask if available, otherwise generate from normal map
     mask = None
     if os.path.exists(mask_path):
         print(f"Loading mask from {mask_path}")
         mask = load_mask(mask_path)
         print(f"Mask shape: {mask.shape}, valid pixels: {np.sum(mask)}")
-    
-    # Load normal map if available
-    normal_map = None
-    if os.path.exists(normal_map_path):
-        print(f"Loading normal map from {normal_map_path}")
-        normal_map = load_normal_map(normal_map_path)
-        if normal_map is not None:
-            print(f"Normal map shape: {normal_map.shape}")
-            print("Transforming normals from camera space to world space...")
-            normal_map = transform_normals_to_world_space_gpu(normal_map, camera_intrinsics)
+    else:
+        print("Mask not found, generating from normal map")
+        # Create mask where normal values are non-zero
+        # Assuming normals at (0,0,0) are invalid
+        normal_magnitude = np.linalg.norm(normal_map, axis=2)
+        mask = (normal_magnitude > 0.1).astype(np.uint8) * 255
+        print(f"Generated mask from normal map, valid pixels: {np.sum(mask > 0)}")
+
+    # Transform normals AFTER mask generation
+    print("Transforming normals from camera space to world space...")
+    normal_map = transform_normals_to_world_space_gpu(normal_map, camera_intrinsics)
     
     # Load color image if available
     color_map = None
@@ -112,12 +130,25 @@ def process_dataset(input_dir, dataset_name, point_cloud_dir):
         else:
             print(f"Failed to load metallic map from {metallic_path}")
     
+    # Create output directory with the same relative path
+    output_dir = os.path.join(output_base_dir, rel_path, dataset_name)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create visualization directory
+    vis_dir = os.path.join(output_dir, 'visualization')
+    os.makedirs(vis_dir, exist_ok=True)
+    
     # Process the depth map using the normal map for correction
     print("Processing depth map...")
     depth_processor = DepthProcessor()
+    
+    discontinuity_vis_path = os.path.join(vis_dir, 'discontinuity_removal.png')
     processed_depth = depth_processor.process_metric_depth(
         depth_map, 
-        mask
+        mask=mask,
+        normal_map=normal_map,
+        visualize_discontinuities=True,
+        discontinuity_vis_path=discontinuity_vis_path
     )
     
     # Generate the volumetric representation
@@ -152,8 +183,8 @@ def process_dataset(input_dir, dataset_name, point_cloud_dir):
         print("Using original colors from texture for point cloud")
     
     # Save the extended PLY with material properties
-    ply_filename = f"point_cloud_pbr_{dataset_name}.ply"
-    pcd_output_path = os.path.join(point_cloud_dir, ply_filename)
+    ply_filename = f"point_cloud_pbr.ply"
+    pcd_output_path = os.path.join(output_dir, ply_filename)
     print(f"Saving point cloud with PBR materials to {pcd_output_path}")
     
     save_extended_ply_with_plyfile(
@@ -162,15 +193,66 @@ def process_dataset(input_dir, dataset_name, point_cloud_dir):
         material_properties=volume.get("material_properties", {})
     )
     
-    print(f"Dataset {dataset_name} processing completed successfully!")
+    print(f"Dataset {os.path.join(rel_path, dataset_name)} processing completed successfully!")
     return True
 
 
+def find_depth_maps(base_dir):
+    """
+    Recursively find all depth_map.tiff files in the directory structure
+    
+    Args:
+        base_dir: Base directory to search
+    
+    Returns:
+        List of tuples: (absolute_path, relative_path)
+    """
+    result = []
+    base_path = Path(base_dir)
+    
+    # Debug: List all tiff files to see what's available
+    print("DEBUG: Checking for depth map files...")
+    tiff_count = len(list(base_path.rglob('*.tiff')))
+    tif_count = len(list(base_path.rglob('*.tif')))
+    print(f"Found {tiff_count} .tiff files and {tif_count} .tif files")
+    
+    # Search for depth_map.tiff files
+    for path in base_path.rglob('depth_map.tiff'):
+        # Get the directory containing the depth map
+        dir_path = path.parent
+        # Calculate relative path from base_dir
+        rel_path = str(dir_path.relative_to(base_path).parent)
+        if rel_path == '.':
+            rel_path = ''
+        
+        result.append((str(dir_path), rel_path))
+    
+    # If no matches found, print some debugging info
+    if not result:
+        print("No depth_map.tiff files found. Checking first few .tiff files:")
+        for i, path in enumerate(base_path.rglob('*.tiff')):
+            if i < 5:  # Show only first 5
+                print(f"  Found: {path}")
+    
+    return result
+
+
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Process depth maps recursively')
+    parser.add_argument('--input', '-i', default=None, help='Input directory to search for depth maps')
+    parser.add_argument('--output', '-o', default=None, help='Output directory for point clouds')
+    args = parser.parse_args()
+    
     # Set base directories
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    input_base_dir = os.path.join(base_dir, 'data', 'input')
-    point_cloud_dir = os.path.join(base_dir, 'data', 'point_cloud')
+    
+    # Use command line arguments if provided, otherwise use defaults
+    input_base_dir = args.input if args.input else os.path.join(base_dir, 'data', 'input')
+    point_cloud_dir = args.output if args.output else os.path.join(base_dir, 'data', 'cloudpoint')
+    
+    print(f"Searching for depth maps in: {input_base_dir}")
+    print(f"Output directory: {point_cloud_dir}")
     
     # Create output directory if it doesn't exist
     os.makedirs(point_cloud_dir, exist_ok=True)
@@ -178,34 +260,16 @@ def main():
     # Start time
     start_time = time.time()
     
-    # Process the main input folder itself
-    if os.path.exists(os.path.join(input_base_dir, 'depth.tiff')):
-        process_dataset(input_base_dir, "main", point_cloud_dir)
-    
-    # Get all subdirectories that look like datasets (containing depth.tiff)
-    # First try numbered subdirectories format (1.data, 2.data, etc.)
-    dataset_dirs = sorted(glob.glob(os.path.join(input_base_dir, "*.data")))
-    
-    # If no numbered directories found, look for any subdirectory with depth.tiff
-    if not dataset_dirs:
-        # Get all subdirectories
-        for root, dirs, _ in os.walk(input_base_dir):
-            for dir_name in dirs:
-                dir_path = os.path.join(root, dir_name)
-                # Check if this directory contains a depth map
-                if os.path.exists(os.path.join(dir_path, 'depth.tiff')):
-                    dataset_dirs.append(dir_path)
+    # Find all depth.tiff files recursively
+    dataset_dirs = find_depth_maps(input_base_dir)
     
     # Process each dataset
     print(f"Found {len(dataset_dirs)} datasets to process")
     
     processed_count = 0
-    for dataset_dir in dataset_dirs:
-        # Extract the dataset name from the directory path
-        dataset_name = os.path.basename(dataset_dir).split('.')[0]
-        
+    for dir_path, rel_path in dataset_dirs:
         # Process the dataset
-        if process_dataset(dataset_dir, dataset_name, point_cloud_dir):
+        if process_dataset(dir_path, point_cloud_dir, rel_path):
             processed_count += 1
     
     # Calculate elapsed time

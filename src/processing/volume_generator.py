@@ -188,7 +188,7 @@ class VolumeGenerator:
         print("Removing outliers from point cloud...")
         pcd, inlier_indices = pcd.remove_statistical_outlier(
             nb_neighbors=20,
-            std_ratio=2.0
+            std_ratio=4.0
         )
 
         # Update material properties to match the filtered point cloud
